@@ -8,7 +8,7 @@ import pytest
 from tests.gateway.test_managed_turn_contract import assignment
 
 
-def _execute(tmp_path, monkeypatch, events, *, start_error=None, close_error=None):
+def _execute(tmp_path, monkeypatch, events, *, start_error=None, close_error=None, finish_wait=None):
     from agent import managed_worker as worker
 
     class RPC:
@@ -38,6 +38,8 @@ def _execute(tmp_path, monkeypatch, events, *, start_error=None, close_error=Non
         def __init__(self, *args):
             self.stopped, self.finish = threading.Event(), threading.Event()
             self.finish.set()
+            if finish_wait is not None:
+                self.finish = SimpleNamespace(wait=finish_wait)
         def approval(self, data): pass
         def clarify(self, questions): pass
 
@@ -77,3 +79,29 @@ def test_a_failing_rpc_close_never_masks_the_turns_outcome(tmp_path, monkeypatch
         with pytest.raises(RuntimeError, match='construct_failed'):
             _execute(tmp_path, monkeypatch, events, start_error=start_error, close_error=OSError('close'))
         assert events[-1] == 'rpc.close'
+
+
+@pytest.mark.parametrize('delay', [45, 60])
+def test_finish_control_uses_the_owner_write_budget(tmp_path, monkeypatch, delay):
+    from hermes_state import SessionDB
+    events, waits = [], []
+    # Model time at Event.wait: exercise execute without spending another minute per case.
+    def finish_wait(timeout):
+        waits.append(timeout)
+        return timeout >= delay
+    _execute(tmp_path, monkeypatch, events, finish_wait=finish_wait)
+    assert waits == [SessionDB._TRANSCRIPT_WRITE_PATIENCE_S + SessionDB._WRITE_PATIENCE_S]
+    assert events[-4:] == ['store.finish', 'finished', 'store.close', 'rpc.close']
+
+
+def test_silent_finish_control_never_claims_durable_finish(tmp_path, monkeypatch):
+    events, waits = [], []
+    def silent(timeout):
+        waits.append(timeout)
+        return False
+    with pytest.raises(ValueError, match='managed_finish_timeout'):
+        _execute(tmp_path, monkeypatch, events, finish_wait=silent)
+    assert len(waits) == 1 and 0 < waits[0] < float('inf')
+    assert 'result' in events
+    assert 'store.finish' not in events and 'finished' not in events
+    assert events[-2:] == ['store.close', 'rpc.close']

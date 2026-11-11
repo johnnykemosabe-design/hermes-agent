@@ -278,6 +278,20 @@ class GatewayAuthorizationMixin:
             return True
         return self._default_bot_routes_to(source, identity.runtime_profile)
 
+    def _names_receiving_bot(self, source: SessionSource, identity) -> bool:
+        """Whether a multiplexed *identity* names the bot that received *source*: not inferred, and not
+        a restored primary guess (:meth:`_restored_transport_trusted`). The shared-listener mirrors
+        (api_server, webhook) are exempt: a secondary profile's /p/<profile>/ surface IS the primary's
+        listener by construction (``SHARED_LISTENER_MIRROR_PLATFORMS``), never a guess.
+        LOCAL is not: its saved launch-profile transport is the session authority's fact, but the bot
+        that answers is the runtime profile's own LocalSessionAdapter (#139060), as on a live turn."""
+        if identity is None or not identity.multiplexed or identity.transport_inferred:
+            return False
+        from gateway.config import SHARED_LISTENER_MIRROR_PLATFORMS
+        platform = getattr(getattr(source, "platform", None), "value", None)
+        return (platform in SHARED_LISTENER_MIRROR_PLATFORMS
+                or self._restored_transport_trusted(source, identity))
+
     def _is_shared_bot_satellite(self, profile_name: str, platform: Optional[Platform] = None) -> bool:
         """A served profile that a ``profile_routes`` entry targets through the default profile's bot
         (gateway/AGENTS.md). With no *platform*, it must own no bot at all: such a profile drains
@@ -328,11 +342,12 @@ class GatewayAuthorizationMixin:
         from gateway.session_identity import identity_of
         identity = identity_of(source)
         # An INFERRED transport is a guess (the primary profile), not a receiving bot: a hand-built
-        # internal/voice source canonicalized by ``run_inbound`` would otherwise take the primary's
-        # adapter for any chat, skipping the satellite route gate in ``_delivery_adapter_for`` and
-        # an owned-but-down bot's fail-closed row. It has no live provenance, so intake is None and
-        # delivery resolves the runtime profile's owner. Covers LOCAL too (#139060).
-        if identity is not None and identity.multiplexed and not identity.transport_inferred:
+        # internal source canonicalized by ``run_inbound`` (the CLI handoff turn) would otherwise take
+        # the primary's adapter for any chat, skipping the satellite route gate in
+        # ``_delivery_adapter_for`` and an owned-but-down bot's fail-closed row. So would that guess
+        # saved by an older release and restored after a restart. Neither has live provenance, so
+        # intake is None and delivery resolves the runtime profile's owner. Covers LOCAL (#139060).
+        if self._names_receiving_bot(source, identity):
             return self._adapters_for_profile(identity.transport_profile).get(platform) if platform else None
         if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
             return self._primary_adapters().get(platform) if platform else None
@@ -369,9 +384,10 @@ class GatewayAuthorizationMixin:
         # fixture) uses the unique-owner heuristic below.
         from gateway.session_identity import identity_of
         identity = identity_of(source)
-        if identity is not None and identity.multiplexed and not identity.transport_inferred:
+        if self._names_receiving_bot(source, identity):
             return None
-        # No identity, or one whose transport was only inferred (hand-built source, pre-column row):
+        # No identity, or one whose transport was only guessed (hand-built source, pre-column row, a
+        # primary guess an older release saved):
         # the unique owner of ``(platform, runtime_profile)`` delivers.
         # ``getattr``: test fixtures build bare SimpleNamespace sources without ``profile``.
         # A satellite with no bot on the platform borrows the primary only for its routed chats.
@@ -687,6 +703,31 @@ class GatewayAuthorizationMixin:
                 source.platform.value if source.platform else "", source.chat_id, source.user_id,
             )
         return allowed
+
+    def _admit_bot_chain(self, event) -> bool:
+        """The chain rules for one admitted inbound message (``BotLoopGuard.chain_admit``), read under the
+        transport profile like the budget. A human message resets its conversation's chain; a bot message
+        past ``max_hops``, a repeat of the same ask, or a bot answering the reply this bot just gave it
+        starts no turn (#137027)."""
+        from gateway.session_ingress import executing_admission
+        source = event.source
+        is_bot = bool(getattr(source, "is_bot", False))
+        # A committed admission re-enters the handler to execute; ingress already judged that message.
+        if executing_admission.get() or getattr(event, "internal", False) or (
+                not is_bot and not self._bot_loop_guard_instance().tracking_chains):
+            return True
+        allowed, state = self._under_authorization_profile(source, lambda: self._bot_loop_guard_instance().chain_admit(
+            self._bot_loop_guard_conversation(source), str(source.user_id or ""), str(event.text or ""), is_bot=is_bot))
+        if not allowed:
+            logger.info("Bot loop guard ended a bot exchange in %s chat %s (%s from %s; gateway.bot_loop_guard).",
+                        source.platform.value if source.platform else "", source.chat_id, state, source.user_id)
+        return allowed
+
+    def _note_bot_reply(self, source) -> None:
+        """This turn's reply to a bot peer went out: its next message answers an answer."""
+        if getattr(source, "is_bot", False):
+            self._under_authorization_profile(source, lambda: self._bot_loop_guard_instance().note_reply(
+                self._bot_loop_guard_conversation(source), str(source.user_id or "")))
 
     def _is_user_authorized(self, source: SessionSource, *, allow_adapter_delegation: bool = True) -> bool:
         """Whether a user may use the bot.
