@@ -156,6 +156,48 @@ def test_remote_ref_mutations_reach_manual_approval(tmp_path, monkeypatch, comma
         config._LOAD_CONFIG_CACHE.clear()
 
 
+@pytest.mark.parametrize("prefix", [
+    "git -C repo", "git -Crepo", "git -c core.bare=false",
+    "git --git-dir=repo/.git", "git --work-tree repo", "git --no-pager",
+    "git -C 'repo dir' -c core.bare=false",
+])
+@pytest.mark.parametrize("arguments", [
+    "origin --delete feature", "origin -vd feature", "origin :feature",
+    "origin +HEAD:main", "--mirror origin", "--prune origin",
+])
+def test_git_global_options_do_not_hide_remote_ref_mutations(prefix, arguments):
+    dangerous, key, description = detect_dangerous_command(f"{prefix} push {arguments}")
+    assert dangerous is True
+    assert key == description
+    assert description.startswith("git push ")
+
+
+def test_delete_equals_spelling_is_conservatively_gated():
+    assert detect_dangerous_command("git push origin --delete=feature")[0] is True
+
+
+def test_remote_ref_patterns_finish_on_long_nonmatching_arguments():
+    import subprocess
+    import sys
+
+    # A subprocess deadline can interrupt a regex holding the GIL and reaps the child on failure.
+    code = """
+from tools.approval_detection import DANGEROUS_PATTERNS_COMPILED
+rules = [pattern for pattern, description in DANGEROUS_PATTERNS_COMPILED
+         if description.startswith(('git push ', 'gh api '))]
+inputs = [
+    'git push ' + 'a' * 20000,
+    'git ' + '-C repo ' * 2000 + 'status',
+    'git push ' + ' ' * 20000 + 'main',
+    'gh api ' + 'a' * 20000,
+    'gh api -X PATCH ' + 'repos/o/r/git/refs/heads/x ' * 500,
+]
+for text in inputs:
+    assert not any(pattern.search(text) for pattern in rules)
+"""
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=10, capture_output=True)
+
+
 @pytest.mark.parametrize("command", [
     "git push",
     "git push -u origin feature",
@@ -173,6 +215,12 @@ def test_remote_ref_mutations_reach_manual_approval(tmp_path, monkeypatch, comma
     "git push origin --prune-other",
     "git push origin --delete-other",
     "git push origin -D feature",
+    "git -C repo push -u origin feature",
+    "git --no-pager push origin HEAD:refs/heads/x",
+    "git -C repo push origin :",
+    "git -C repo push --dry-run origin main",
+    "git -C push status",
+    "git -C repo; echo push origin :feature",
     "git push --dry-run origin main; echo --delete feature",
     "git push origin main && echo -d",
     "git push origin main | echo -vd",

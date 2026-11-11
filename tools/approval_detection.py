@@ -413,6 +413,16 @@ _PS_EXE_AT_COMMAND_POSITION = (
     r"\s*(?:[^\s;&|\"'(){}\x60]*[\\/])?(?:powershell|pwsh)(?:\.exe)?(?=\s)"
 )
 
+# Only the remote-ref rules below use this prefix; keep each global option tied to its
+# own operand instead of allowing arbitrary words between git and push.
+_GIT_REMOTE_PUSH_RE = (
+    r'''\bgit[^\S\n]+(?:'''
+    r'''(?:-[Cc][^\S\n]*|--(?:git-dir|work-tree|namespace|config-env)(?:=|[^\S\n]+))'''
+    r'''(?:"[^";|&\n]*"|'[^';|&\n]*'|[^\s;|&"']+)[^\S\n]+'''
+    r'''|(?:-[pP]|--(?:no-pager|paginate|bare|no-replace-objects|literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs|no-optional-locks|no-lazy-fetch))[^\S\n]+'''
+    r''')*push\b'''
+)
+
 DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
@@ -661,22 +671,24 @@ DANGEROUS_PATTERNS = [
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
     # Remote deletion can discard history just as a force push can. Keep each new rule inside
     # one command segment so flags/refspecs in a later command cannot turn a normal push dangerous.
-    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?(?:--delete|(?-i:-[a-zA-Z]*d[a-zA-Z]*))(?=[\s"';|&]|$)''', "git push deleting a remote ref (rewrites remote history)"),
+    # After a lazy segment scan, one whitespace character is enough for a token boundary;
+    # a whitespace '+' there would repeatedly rescan long runs of spaces (quadratic backtracking).
+    (rf'''{_GIT_REMOTE_PUSH_RE}[^;|&\n]*?[^\S\n]["']?(?:--delete(?=[\s="';|&]|$)|(?-i:-[a-zA-Z]*d[a-zA-Z]*)(?=[\s"';|&]|$))''', "git push deleting a remote ref (rewrites remote history)"),
     # A bare ':' is Git's matching push, not a deletion; require a nonempty destination.
-    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?:[^\s:;|&"']+''', "git push deleting a remote ref (rewrites remote history)"),
-    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?\+[^\s;|&"']+''', "git push force refspec (rewrites remote history)"),
-    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?--mirror(?=[\s"';|&]|$)''', "git push --mirror (rewrites and deletes remote refs)"),
-    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?--prune(?=[\s"';|&]|$)''', "git push --prune (deletes remote refs)"),
+    (rf'''{_GIT_REMOTE_PUSH_RE}[^;|&\n]*?[^\S\n]["']?:[^\s:;|&"']+''', "git push deleting a remote ref (rewrites remote history)"),
+    (rf'''{_GIT_REMOTE_PUSH_RE}[^;|&\n]*?[^\S\n]["']?\+[^\s;|&"']+''', "git push force refspec (rewrites remote history)"),
+    (rf'''{_GIT_REMOTE_PUSH_RE}[^;|&\n]*?[^\S\n]["']?--mirror(?=[\s"';|&]|$)''', "git push --mirror (rewrites and deletes remote refs)"),
+    (rf'''{_GIT_REMOTE_PUSH_RE}[^;|&\n]*?[^\S\n]["']?--prune(?=[\s"';|&]|$)''', "git push --prune (deletes remote refs)"),
     # gh accepts the method and endpoint in either order. The lookahead must stay in the
     # same segment as the endpoint; a later command's DELETE must not taint an ordinary GET.
     (r'''\bgh[^\S\n]+api\b'''
-     r'''(?=[^;|&\n]*?[^\S\n]+(?:-X[^\S\n]*|--method(?:=|[^\S\n]+))["']?delete(?=[\s"';|&]|$))'''
-     r'''[^;|&\n]*?[^\S\n]+["']?(?:[^\s;|&"']*/)?git/refs/[^\s;|&"']+''',
+     r'''(?=[^;|&\n]*?[^\S\n](?:-X[^\S\n]*|--method(?:=|[^\S\n]+))["']?delete(?=[\s"';|&]|$))'''
+     r'''[^;|&\n]*?[^\S\n]["']?(?:[^\s;|&"']*/)?git/refs/[^\s;|&"']+''',
      "gh api deleting a remote ref (rewrites remote history)"),
     (r'''\bgh[^\S\n]+api\b'''
-     r'''(?=[^;|&\n]*?[^\S\n]+(?:-X[^\S\n]*|--method(?:=|[^\S\n]+))["']?patch(?=[\s"';|&]|$))'''
+     r'''(?=[^;|&\n]*?[^\S\n](?:-X[^\S\n]*|--method(?:=|[^\S\n]+))["']?patch(?=[\s"';|&]|$))'''
      r'''(?=[^;|&\n]*?(?:[^\S\n]|=)["']?force=true(?=[\s"';|&]|$))'''
-     r'''[^;|&\n]*?[^\S\n]+["']?(?:[^\s;|&"']*/)?git/refs/[^\s;|&"']+''',
+     r'''[^;|&\n]*?[^\S\n]["']?(?:[^\s;|&"']*/)?git/refs/[^\s;|&"']+''',
      "gh api force updating a remote ref (rewrites remote history)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
     # `-D` = `-d --force`: only the capital short flag is force-delete, so the group opts out of
