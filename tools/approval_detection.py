@@ -659,6 +659,25 @@ DANGEROUS_PATTERNS = [
     (r'\bgit\s+reset\s+--h(?:a(?:r(?:d)?)?)?\b', "git reset --hard (destroys uncommitted changes)"),
     (r'\bgit\s+push\b.*--forc[a-z]*\b', "git force push (rewrites remote history)"),
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
+    # Remote deletion can discard history just as a force push can. Keep each new rule inside
+    # one command segment so flags/refspecs in a later command cannot turn a normal push dangerous.
+    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?(?:--delete|(?-i:-[a-zA-Z]*d[a-zA-Z]*))(?=[\s"';|&]|$)''', "git push deleting a remote ref (rewrites remote history)"),
+    # A bare ':' is Git's matching push, not a deletion; require a nonempty destination.
+    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?:[^\s:;|&"']+''', "git push deleting a remote ref (rewrites remote history)"),
+    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?\+[^\s;|&"']+''', "git push force refspec (rewrites remote history)"),
+    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?--mirror(?=[\s"';|&]|$)''', "git push --mirror (rewrites and deletes remote refs)"),
+    (r'''\bgit[^\S\n]+push\b[^;|&\n]*?[^\S\n]+["']?--prune(?=[\s"';|&]|$)''', "git push --prune (deletes remote refs)"),
+    # gh accepts the method and endpoint in either order. The lookahead must stay in the
+    # same segment as the endpoint; a later command's DELETE must not taint an ordinary GET.
+    (r'''\bgh[^\S\n]+api\b'''
+     r'''(?=[^;|&\n]*?[^\S\n]+(?:-X[^\S\n]*|--method(?:=|[^\S\n]+))["']?delete(?=[\s"';|&]|$))'''
+     r'''[^;|&\n]*?[^\S\n]+["']?(?:[^\s;|&"']*/)?git/refs/[^\s;|&"']+''',
+     "gh api deleting a remote ref (rewrites remote history)"),
+    (r'''\bgh[^\S\n]+api\b'''
+     r'''(?=[^;|&\n]*?[^\S\n]+(?:-X[^\S\n]*|--method(?:=|[^\S\n]+))["']?patch(?=[\s"';|&]|$))'''
+     r'''(?=[^;|&\n]*?(?:[^\S\n]|=)["']?force=true(?=[\s"';|&]|$))'''
+     r'''[^;|&\n]*?[^\S\n]+["']?(?:[^\s;|&"']*/)?git/refs/[^\s;|&"']+''',
+     "gh api force updating a remote ref (rewrites remote history)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
     # `-D` = `-d --force`: only the capital short flag is force-delete, so the group opts out of
     # the module-wide re.IGNORECASE and relies on _lower_preserving_flags keeping dash-prefixed
