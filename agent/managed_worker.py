@@ -331,7 +331,7 @@ def execute(frame, channel):
     # The owner RPC below imports gateway/config modules (hermes_cli.config, providers,
     # hermes_cli.plugins) transitively; the policy must already be frozen when they load.
     bind_worker_policy(frame)
-    from agent.runtime_session_store import RuntimeSessionStore, WorkerRPC
+    from agent.runtime_session_store import RuntimeSessionStore, WorkerRPC, worker_answer_budget
     scope = dict(frame['scope'])
     rpc = WorkerRPC(frame['home'])
     adopted = rpc('worker.adopt', **{k: v for k, v in scope.items() if k != 'epoch'})
@@ -412,7 +412,8 @@ def execute(frame, channel):
             if result.get('final_response') is None and (result.get('interrupted') or result.get('failed')):
                 result['final_response'] = ''
             channel.send('result', result=result_frame(result))
-            if not controls.finish.wait(30):
+            # The same owner's control answer must not have a shorter scheduling budget.
+            if not controls.finish.wait(worker_answer_budget()):
                 raise ValueError('managed_finish_timeout')
             store.finish()
             channel.send('finished')

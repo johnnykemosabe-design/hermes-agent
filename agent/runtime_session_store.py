@@ -115,6 +115,15 @@ class _OwnerLink:
         return reply
 
 
+def worker_answer_budget():
+    """Wait past the owner's transcript-write patience, with one routine-write budget of
+    scheduling/transport headroom. This is finite patience, not an end-to-end write bound:
+    Python locks and owner scheduling can still outlast it. Importing SessionDB opens no store.
+    """
+    from hermes_state import SessionDB
+    return SessionDB._TRANSCRIPT_WRITE_PATIENCE_S + SessionDB._WRITE_PATIENCE_S
+
+
 class WorkerRPC:
     """Bounded authenticated calls to an existing owner; never starts a daemon.
 
@@ -194,7 +203,7 @@ class WorkerRPC:
                     self._drop()
                     link = self._connection()
                     link.send(request_id, message)
-                response = link.receive(20)
+                response = link.receive(worker_answer_budget())
             except BaseException:
                 # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()
