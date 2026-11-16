@@ -2101,12 +2101,6 @@ def _dispatch_lane_task(
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
-        # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
-        # operator-configured fallback exists, persist the assignment and proceed. This removes the
-        # dashboard footgun where a task created without an assignee parks in 'ready' forever even though
-        # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
-        # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
-        # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
@@ -2118,6 +2112,9 @@ def _dispatch_lane_task(
         if per_profile_cap is not None and name:
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
 
+    from hermes_cli.kanban_disk_floor.admission import preclaim
+    if not preclaim(conn, task_id, result, dry_run=dry_run):
+        return False
     if dry_run:
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)

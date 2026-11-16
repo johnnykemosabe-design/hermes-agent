@@ -417,6 +417,9 @@ model:
 # Disable this only when every review is performed manually from the dashboard.
 kanban:
   review_dispatch: true
+  # Defer new workers when the Hermes home volume is below this many GiB.
+  # 0 (default) disables the check; disk probe errors warn and fail open.
+  min_free_disk_gb: 0
 
 # =============================================================================
 # Terminal Tool Configuration

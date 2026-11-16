@@ -1844,6 +1844,8 @@ DEFAULT_CONFIG = {
         "review_dispatch": True,
         # Seconds between dispatcher ticks. Lower = snappier pickup; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
+        # Opt-in floor on the Hermes home volume, in GiB. 0 disables disk admission.
+        "min_free_disk_gb": 0,
         # Auto-block after this many consecutive non-success attempts (spawn_failed, timed_out,
         # crashed) for the same task/profile. Reassignment resets the streak.
         "failure_limit": 2,
@@ -1871,9 +1873,6 @@ DEFAULT_CONFIG = {
         # Per-profile cap: positive int = no single profile runs more than N workers even if the
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
         # when fan-out would saturate one profile's model/API quota/browser pool.
-        # Unset (None) means "no per-profile cap" — backward-compatible with existing installs. Useful for
-        # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
-        # pool while leaving other profiles idle. See #21582.
         "max_in_progress_per_profile": None,
         # Per-home claim allowlist for boards shared across Hermes homes (#110995): profile names
         # this home's dispatcher may claim (list or comma-separated string). None = any existing

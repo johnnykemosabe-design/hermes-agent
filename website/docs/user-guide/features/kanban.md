@@ -322,6 +322,7 @@ up on the next tick (60s by default).
 kanban:
   dispatch_in_gateway: true        # default
   dispatch_interval_seconds: 60    # default
+  min_free_disk_gb: 0              # default: off; positive value enables a GiB floor
   review_dispatch: true            # default: spawn the assigned profile with
                                    # the bundled sdlc-review skill. Set false
                                    # for human-only review boards.
@@ -340,6 +341,31 @@ start` directly, or wire the gateway up as a systemd user unit (see the
 gateway docs). Without a running gateway, `ready` tasks stay where they are
 until one comes up — `hermes kanban create` warns about this at creation
 time.
+
+#### Free-disk admission
+
+Set `kanban.min_free_disk_gb` to a positive number to defer **new** workers
+when free space on the active Hermes home volume is below that floor. Units
+are GiB (1 GiB = 2³⁰ bytes); fractional values are supported. For example,
+`hermes config set kanban.min_free_disk_gb 5` sets a 5 GiB admission floor.
+The default `0` disables the guard and does not probe the disk.
+
+The check runs before each ready/review claim, workspace creation and spawn,
+in both the embedded and standalone dispatcher. A deferred task keeps its
+current lane and retry budget; it gets a warning and a `respawn_guarded` task
+event with reason `disk_floor`, measured free bytes and configured floor.
+Running workers are unchanged, and normal recovery/promotion still runs.
+Every later tick probes again: space at or above the floor admits work without
+an unblock operation or persisted latch. Dry-run reports the suppression but
+does not write its event. This is an admission check, not a space reservation:
+other processes or already-running workers can still consume disk space.
+
+If the OS disk-usage probe raises an error, dispatch **fails open** with a
+warning rather than indefinitely stopping the queue on an unavailable probe.
+Invalid floor values (negative, non-finite, boolean or non-numeric) warn and
+disable this guard. No cleanup, deletion or worker termination is performed.
+The measured volume is the Hermes home volume, not a separately mounted custom
+workspace volume.
 
 #### Workers and systemd cgroups
 
