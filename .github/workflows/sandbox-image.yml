@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: sandbox-image-${{ github.event.pull_request.number || github.ref }}
+  group: sandbox-image-${{ github.event.pull_request.number || github.ref }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

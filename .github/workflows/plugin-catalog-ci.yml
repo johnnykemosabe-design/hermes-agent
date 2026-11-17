@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: plugin-catalog-ci-${{ github.ref }}
+  group: plugin-catalog-ci-${{ github.ref }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: true
 
 jobs:

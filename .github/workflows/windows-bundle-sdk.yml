@@ -19,7 +19,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: windows-bundle-sdk-${{ github.ref }}
+  group: windows-bundle-sdk-${{ github.ref }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: true
 jobs:
   windows-bundle-tools:
