@@ -10,6 +10,7 @@ on:
       - 'tests/scripts/test_termux*'
       - '.github/workflows/termux-verify.yml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'scripts/termux/**'
       - 'pm/**'
@@ -36,11 +37,12 @@ permissions:
 # A workflow_call run (stable release) is never cancelled: its group uses
 # github.run_id so a parent rerun cannot kill this child mid-flight.
 concurrency:
-  group: termux-verify-${{ inputs.release == true && github.run_id || github.ref }}
+  group: termux-verify-${{ inputs.release == true && github.run_id || github.ref }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: ${{ inputs.release != true }}
 
 jobs:
   contracts:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Termux packaging contracts on Linux
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -71,6 +73,7 @@ jobs:
             tests/scripts/test_run_tests_shell.py
 
   tui:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Prebuilt TUI checks
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15

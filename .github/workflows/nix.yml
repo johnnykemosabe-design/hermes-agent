@@ -12,6 +12,7 @@ name: Nix flake check
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_call:
@@ -40,7 +41,7 @@ permissions:
 # cancel-in-progress is false there — each run saves the store cache that
 # later PRs restore from.
 concurrency:
-  group: nix-${{ inputs.release == true && github.run_id || github.event.pull_request.number || github.ref }}
+  group: nix-${{ inputs.release == true && github.run_id || github.event.pull_request.number || github.ref }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: ${{ inputs.release != true && github.event_name == 'pull_request' }}
 
 env:
@@ -57,6 +58,7 @@ jobs:
   # flake turns main red after the merge.
   detect:
     name: Detect affected areas
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:

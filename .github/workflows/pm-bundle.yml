@@ -32,6 +32,7 @@ on:
         type: string
         default: ''
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'pm/**'
       - '!pm/**/*.md'
@@ -51,11 +52,12 @@ permissions:
 # A workflow_call run (stable release) is never cancelled: its group uses
 # github.run_id so a parent rerun cannot kill this child mid-flight.
 concurrency:
-  group: pm-bundle-${{ inputs.release == true && github.run_id || github.ref }}
+  group: pm-bundle-${{ inputs.release == true && github.run_id || github.ref }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: ${{ inputs.release != true }}
 
 jobs:
   bundle:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: bundle ${{ matrix.target.label }}
     runs-on: ${{ matrix.target.runner }}
     # Leave time for setup, cache saves and smoke tests around the wheel build.
