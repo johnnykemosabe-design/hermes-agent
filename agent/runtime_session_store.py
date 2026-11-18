@@ -20,6 +20,8 @@ from hermes_dir_acl import make_user_dir
 
 logger = logging.getLogger(__name__)
 
+_OWNER_RECEIPT_TIMEOUT_S = 180.0
+
 _worker_process = False
 
 
@@ -194,7 +196,7 @@ class WorkerRPC:
                     self._drop()
                     link = self._connection()
                     link.send(request_id, message)
-                response = link.receive(20)
+                response = link.receive(_OWNER_RECEIPT_TIMEOUT_S)
             except BaseException:
                 # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()
