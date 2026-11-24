@@ -152,6 +152,81 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
         error = f'{error_type_name(exc)}: {exc}'
         return False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error
 
+def _receipt_superseded(current, frozen_job, row, execution_id):
+    """An old receipt may close its audit row, never roll current job state backwards.
+
+    Prefer the fire's durable claim time. After ledger retention, the admission's
+    frozen job is the pre-fire watermark. Already-booked attempts may finish
+    audit-only too: completion-id lists cannot prove freshness after an untracked
+    (for example script-only) completion.
+    """
+    from datetime import datetime
+    if current is None:
+        return True
+    latest = current.get('last_run_at')
+    if not latest:
+        return False
+    cutoff = row.get('claimed_at') if row is not None else frozen_job.get('last_run_at')
+    return cutoff is None or datetime.fromisoformat(latest) > datetime.fromisoformat(cutoff)
+
+
+def _finish_superseded_receipt(delivery, execution_id, journal):
+    """Audit only: no job counters, schedule, incidents, queue or failure notices."""
+    from cron.executions import FIRER_FINISHED_STATES, get_execution, recover_receipted_execution
+    finished = recover_receipted_execution(
+        execution_id, job_id=delivery.job['id'], success=delivery.success,
+        error=delivery.error, delivery_outcome='suppressed')
+    if finished is None:
+        current = get_execution(execution_id)
+        if current is not None and current['status'] not in FIRER_FINISHED_STATES:
+            return False
+    journal.unlink(missing_ok=True)
+    return True
+
+
+def _finish_recovered_tail(state, params, record, journal):
+    from cron.executions import FIRER_FINISHED_STATES, execution_owner_live, get_execution
+    from cron.jobs import _fire_job_lock, get_job, save_job_output
+    from cron.scheduler import (_RunDelivery, _FireOwnership, _apply_agent_failure_marker,
+                                _save_compose_deliver, _fire_secret_scope)
+    from cron.scheduler_bookkeeping import fail_empty_response, finish_completed_run
+
+    job = dict(state['job'], **(state.get('job_flags') or {}))
+    execution_id = job['execution_id'] = params['request_id']
+    # The ticker has the right home/store, but no fire secret scope. Reset it even
+    # when save/compose/deliver/finish raises; never fall back to the launch env.
+    with _fire_secret_scope(), _fire_job_lock(job['id']) as acquired:
+        if not acquired or not journal.exists() or execution_owner_live(execution_id, job['id']):
+            return
+        row = get_execution(execution_id)
+        if row is not None and row['job_id'] == job['id'] and row['status'] in FIRER_FINISHED_STATES:
+            journal.unlink(missing_ok=True)
+            return
+        # Serialize the freshness decision AND terminal effects against ordinary
+        # mark_job_run. A newer completion cannot race between this check and delivery.
+        superseded = _receipt_superseded(
+            get_job(job['id']), {} if state.get('receipt_missing') else job, row, execution_id)
+        success, output, answer, error = state['result']
+        success, error, declared = _apply_agent_failure_marker(job, success, error, answer)
+        delivery = _RunDelivery(job, success, error, agent_declared=declared)
+        if not str(output or '').strip():
+            output = f'# Cron Job: {job["id"]} (RECOVERED)\n\n{error or "Canonical receipt has no saved output"}\n'
+        if superseded:
+            fail_empty_response(delivery, answer)
+            if get_job(job['id']) is not None:
+                save_job_output(job['id'], output, execution_id=execution_id)
+            finished = _finish_superseded_receipt(delivery, execution_id, journal)
+        else:
+            # The receipt supplies the result, not the dead firer's claim.
+            fence = _FireOwnership(dict(job, fire_claim=None))
+            _save_compose_deliver(delivery, fence, answer, output, adapters=None, loop=None,
+                                 verbose=False, execution_token=None)
+            fail_empty_response(delivery, answer)
+            finished = finish_completed_run(delivery, None, execution_id, recovered=True)
+        if finished:
+            _lift_pause(job['id'], record.get('pause_recorded'))
+
+
 def reconcile_pending(*, allow_connect=True):
     """Observe prepared fires; never submit missing or interrupted work.
 
@@ -163,9 +238,6 @@ def reconcile_pending(*, allow_connect=True):
     from hermes_cli.gateway_client import connect_gateway
     from cron.executions import FIRER_FINISHED_STATES, execution_owner_live, get_execution
     from cron.jobs import get_job, pause_job
-    from cron.scheduler import (_RunDelivery, _FireOwnership, _apply_agent_failure_marker,
-                                _save_compose_deliver)
-    from cron.scheduler_bookkeeping import fail_empty_response, finish_completed_run
     from utils import atomic_json_write
     import logging
 
@@ -209,7 +281,7 @@ def reconcile_pending(*, allow_connect=True):
                     journal.unlink(missing_ok=True)
                     continue
                 error = 'Cron admission missing: the owner never admitted this fire'
-                state = {'status': 'terminal', 'job': current,
+                state = {'status': 'terminal', 'job': current, 'receipt_missing': True,
                          'result': [False, f'# Cron Job: {params["job_id"]} (FAILED)\n\n{error}\n', '', error]}
             if state['status'] != 'terminal':
                 if state['status'] == 'unknown' and not record.get('pause_recorded'):
@@ -217,20 +289,6 @@ def reconcile_pending(*, allow_connect=True):
                     record['pause_recorded'] = _pause_identity(pause_job(params['job_id'], reason=reason))
                     atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
                 continue
-            success, output, answer, error = state['result']
-            job = dict(state['job'], **(state.get('job_flags') or {}))
-            job['execution_id'] = params['request_id']
-            # The same result verdicts as the ordinary tail: an agent-declared [CRON_FAILURE] and a
-            # blank answer are failures, whichever process books them.
-            success, error, declared = _apply_agent_failure_marker(job, success, error, answer)
-            delivery = _RunDelivery(job, success, error, agent_declared=declared)
-            # The canonical receipt supplies the result; a dead scheduler's fire claim does not
-            # authorize replay and must not prevent finishing its durable bookkeeping.
-            fence = _FireOwnership(dict(job, fire_claim=None))
-            _save_compose_deliver(delivery, fence, answer, output, adapters=None, loop=None,
-                                 verbose=False, execution_token=None)
-            fail_empty_response(delivery, answer)
-            if finish_completed_run(delivery, None, params['request_id'], recovered=True):
-                _lift_pause(params['job_id'], record.get('pause_recorded'))
+            _finish_recovered_tail(state, params, record, journal)
         except Exception:
             logging.getLogger(__name__).warning('Cron receipt recovery deferred: %s', journal, exc_info=True)

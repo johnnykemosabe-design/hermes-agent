@@ -3014,10 +3014,16 @@ def _save_compose_deliver(
     with fence.side_effect_fence() as owns_output:
         if not owns_output:
             raise _FireClaimLostDuringSideEffect
+        # Canonical fires and recovery share publication identity, including when
+        # the original firer died after saving but before finishing its journal.
+        from cron.scheduler_authority import journal_path
+        execution_id = job.get('execution_id')
+        output_kwargs = ({'execution_id': execution_id} if execution_id and not job.get('no_agent')
+                         and journal_path(job['id'], execution_id).exists() else {})
         # remove_job() already deleted this job's output dir; saving would re-create an orphan.
         output_file = (
             None if self_removal_delivery_allowed(job["id"])
-            else save_job_output(job["id"], output))
+            else save_job_output(job["id"], output, **output_kwargs))
     if verbose and output_file is not None:
         logger.info("Output saved to: %s", output_file)
 
