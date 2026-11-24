@@ -6,6 +6,7 @@ import contextlib
 import copy
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
 import shutil
@@ -3320,13 +3321,46 @@ def _prune_job_output(job_output_dir: Path, keep: int) -> int:
     return deleted
 
 
-def save_job_output(job_id: str, output: str):
-    """Save job output to file."""
+def save_job_output(job_id: str, output: str, *, execution_id: Optional[str] = None):
+    """Save output; a recovered execution reuses its retained file without pruning again.
+
+    Timestamp prefixes preserve the retention order and legacy readers. The digest binds
+    a recovered fire's identity without treating an RPC request id as a path component.
+    The per-job fence makes lookup/publication atomic across simultaneous recoverers.
+    """
+    if execution_id is not None:
+        with _fire_job_lock(job_id) as acquired:
+            if not acquired:
+                raise RuntimeError('Recovered output fire fence unavailable')
+            from cron.scheduler_authority import journal_path
+            from utils import atomic_json_write
+            suffix = '_' + hashlib.sha256(execution_id.encode('utf-8')).hexdigest()
+            journal = journal_path(job_id, execution_id)
+            record = json.loads(journal.read_text(encoding='utf-8-sig')) if journal.exists() else None
+            if record is not None and record.get('output_file'):
+                name = record['output_file']
+                if (not isinstance(name, str) or '/' in name or '\\' in name
+                        or not name.endswith(suffix + '.md')):
+                    raise ValueError('Recovered output journal identity conflict')
+                # Retention may have removed the file. Publication is still complete;
+                # recreating it would prune another real report on this retry.
+                return _job_output_dir(job_id) / name
+            existing = sorted(_job_output_dir(job_id).glob(f'*{suffix}.md'))
+            output_file = existing[0] if existing else _write_job_output(job_id, output, suffix=suffix)
+            if record is not None:
+                record['output_file'] = output_file.name
+                atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
+            return output_file
+    return _write_job_output(job_id, output)
+
+
+def _write_job_output(job_id: str, output: str, *, suffix: str = ''):
+    """Publish one output using the ordinary timestamp/retention contract."""
     ensure_dirs()
     job_output_dir = _job_output_dir(job_id)
     _ensure_cron_dir(job_output_dir)
     _secure_dir(job_output_dir)
-    output_file = job_output_dir / f"{_hermes_now().strftime('%Y-%m-%d_%H-%M-%S')}.md"
+    output_file = job_output_dir / f"{_hermes_now().strftime('%Y-%m-%d_%H-%M-%S')}{suffix}.md"
     atomic_write_text(output_file, output, tmp_prefix=".output_", mode=0o600)
     _secure_file(output_file)
     # Bound per-job output growth so long-running deploys don't fill the disk (#52383).
