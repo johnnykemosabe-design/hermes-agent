@@ -341,6 +341,50 @@ gateway docs). Without a running gateway, `ready` tasks stay where they are
 until one comes up — `hermes kanban create` warns about this at creation
 time.
 
+#### Host-load spawn guard
+
+The gateway and standalone daemon read `kanban.load_guard` **once at boot**;
+restart the dispatcher to apply policy edits. The one-shot `dispatch` command
+resolves it for that invocation. The default is observation only:
+
+```yaml
+kanban:
+  load_guard:
+    mode: shadow              # shadow | enforce | off
+    load_elevated_per_cpu: 1.0
+    load_critical_per_cpu: 2.0
+    stall_window_s: 300
+```
+
+In `enforce`, the shared ready/review spawn budget takes the worse of the
+existing memory-pressure level and the fresh host observation. One-minute load
+divided by logical CPUs is elevated at **≥ 1.0**, critical at **≥ 2.0**. On
+macOS, CPUs come from `hw.logicalcpu`, and
+`kern.memorystatus_vm_pressure_level` values 2/4 mean elevated/critical. Other
+hosts retain their existing memory classifier and use `os.cpu_count()` for load.
+
+A WS `loop stalled` warning also touches `$HERMES_HOME/run/loop_stall.ts` in the
+process launch home, not the routed profile home. A marker age **< 300 seconds**
+is critical (exactly 300 is expired). Future mtimes are treated as age zero.
+The writer and reader must use the same launch home, even in separate processes.
+Missing markers mean no observed stall; other sampler errors are logged and
+treated as elevated. Elevated allows at most one new worker per tick; critical
+allows none. Reclaim/promotion still run; no running worker is killed or reniced,
+and deferred tasks remain on the board.
+
+`shadow` logs one decision per board tick, including ticks already at their
+concurrency cap, without changing the existing budget:
+`host_pressure=<lvl> load1=<x> per_cpu=<y> stall_age=<s> vm=<n> would_budget=<k>`.
+`None` means unavailable (or an uncapped budget). `off` skips the host sampler
+entirely and retains the original memory guard. Invalid policies warn and fall
+back to shadow defaults; they never silently opt into enforcement. Direct
+`dispatch_once` library callers must pass a resolved `load_guard` policy to opt
+in; omitting it preserves their previous behavior.
+
+Start with a 24-hour shadow observation and compare `would_budget` against host
+load/stall history before opting into enforcement. Installing this code alone
+does not authorize changing a running gateway's configuration or restarting it.
+
 #### Workers and systemd cgroups
 
 Workers are fire-and-forget processes that outlive the dispatcher tick, so

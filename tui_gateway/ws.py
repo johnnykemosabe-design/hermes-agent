@@ -21,6 +21,7 @@ from agent.message_sanitization import _sanitize_surrogates
 from tui_gateway.event_replay import replay_epoch
 from tui_gateway.transport import serialize_frame
 from tui_gateway.ws_legacy_fallback import dispatch_legacy, legacy_fallback_allowed
+from gateway.loop_stall import note_loop_stall
 
 _log = logging.getLogger(__name__)
 
@@ -207,6 +208,7 @@ class WSTransport:
             # scheduled and flushes once the loop breathes. Latching _closed here permanently silenced
             # live windows after one slow write; _safe_send_many latches on a real error.
             _log.warning("ws write slow (loop stalled >%ss) peer=%s — frame left in flight", _WS_WRITE_TIMEOUT_S, self._peer)
+            note_loop_stall()
             return not self._closed
         except Exception as exc:
             self._closed = True

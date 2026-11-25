@@ -17,6 +17,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
+from hermes_cli.kanban_host_pressure import resolve_load_guard_config
 
 
 def _kanban_config() -> dict:
@@ -58,6 +59,7 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
+    load_guard = resolve_load_guard_config()
     # Honour kanban.default_assignee, kanban.max_in_progress,
     # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
     # semantics as the gateway dispatch path.
@@ -65,6 +67,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         from hermes_cli.config import load_config
         _cfg = load_config()
         _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
+        load_guard = resolve_load_guard_config(_kanban_cfg.get("load_guard"))
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
         max_in_progress_per_profile = kbd._positive_int(
             _kanban_cfg.get("max_in_progress_per_profile"), None
@@ -90,6 +93,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            load_guard=load_guard,
         )
     if getattr(args, "json", False):
         _print_json({
