@@ -1846,12 +1846,8 @@ DERIVED_MAX_IN_PROGRESS_CEILING = 8
 
 
 def _system_memory_sample() -> dict:
-    """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
-
-    Local import keeps ``kanban_db`` importable without the gateway package.
-    Module-level indirection is also the test seam — conftest patches this to
-    ``{}`` so results don't depend on the CI runner's live memory.
-    """
+    """Best-effort memory snapshot (KiB), ``{}`` when unknown. Tests patch
+    this seam so dispatch never depends on the test host's live memory."""
     try:
         from gateway.lifecycle_ledger import sample_memory
         return sample_memory() or {}
@@ -1860,11 +1856,8 @@ def _system_memory_sample() -> dict:
 
 
 def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -> Optional[int]:
-    """Memory-derived default for ``kanban.max_in_progress`` when unset:
-    ``clamp(MemTotal / MEMORY_GUARD_MB_PER_WORKER, FLOOR, CEILING)``. Returns
-    ``None`` (no cap) when total memory is unknown, so macOS/Windows dev
-    machines are unaffected.
-    """
+    """Unset cap = clamp(MemTotal / MB_PER_WORKER, FLOOR, CEILING);
+    unknown total = None (uncapped, including macOS/Windows)."""
     if sample is None:
         sample = _system_memory_sample()
     total_kib = sample.get("mem_total_kib")
@@ -1958,13 +1951,17 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     return total
 
 
+def _host_pressure_sample() -> dict:
+    from gateway.loop_stall import loop_stall_path
+    from hermes_platform.host.pressure import sample_host_pressure
+    return sample_host_pressure(loop_stall_path())
+
+
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
     """Classify system memory pressure: ok/elevated/critical/unknown.
 
-    Reuses :func:`gateway.memory_status.classify_pressure` so "critical" matches
-    the dashboard banner and lifecycle-ledger OOM heuristics. ``unknown``
-    (non-Linux, read failure) imposes no restriction — never brick dispatch
-    where /proc is unavailable.
+    Reuses the dashboard/lifecycle classifier. Unknown (/proc unavailable or
+    read failure) imposes no restriction, preserving non-Linux dispatch.
     """
     if sample is None:
         sample = _system_memory_sample()
@@ -1991,6 +1988,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    load_guard: Optional[dict] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2014,6 +2012,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            load_guard=load_guard,
         )
 
     try:
@@ -2239,55 +2238,51 @@ def _tick_spawn_budget(
     max_spawn: Optional[int],
     max_in_progress: Optional[int],
     board: Optional[str],
+    load_guard: Optional[dict] = None,
 ) -> tuple[bool, Optional[int]]:
-    """``(may_spawn, spawn_budget)`` for this tick; ``budget None`` = uncapped.
-
-    ``max_spawn`` is a live per-board concurrency cap (running + this tick's
-    spawns), not a per-tick budget — a per-tick reading would grow concurrency
-    by N every tick. ``max_in_progress`` is a HOST-level cap: running workers on
-    every other board count against the same budget, else N boards multiply the
-    cap by N — exactly the fan-out the memory-derived default exists to prevent.
+    """``(may_spawn, spawn_budget)``; ``budget None`` = uncapped.
+    ``max_spawn`` caps live board concurrency; ``max_in_progress`` caps the host
+    across boards. Both lanes share the remainder and the worse host/memory level.
     """
-    # Count already-running tasks so max_spawn enforces concurrency, not a
-    # per-tick budget: "running" tasks stay running until the worker makes a terminal
-    # board call (kanban_complete/kanban_block/kanban_request_review) or the TTL reclaims them.
+    from hermes_cli.kanban_host_pressure import host_pressure
     running_count = 0
     spawn_budget: Optional[int] = None
     if max_spawn is not None or max_in_progress is not None:
         running_count = count_running_tasks(conn)
 
-    # Both ready and review loops consume from the same budget.
+
     if max_spawn is not None:
         if running_count >= max_spawn:
+            host_pressure("unknown", 0, load_guard, _host_pressure_sample, _kb._log)
             return False, None
         spawn_budget = max_spawn - running_count
 
     if max_in_progress is not None:
         total_running = running_count + count_running_tasks_other_boards(board)
         if total_running >= max_in_progress:
+            host_pressure("unknown", 0, load_guard, _host_pressure_sample, _kb._log)
             return False, None
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
             spawn_budget = remaining
 
-    # Memory-pressure guard: a static cap can't see the host's actual state.
-    # critical -> spawn nothing this tick; elevated -> at most one new worker.
-    # Reclaim/promotion already ran, so bookkeeping stays live; deferred tasks
-    # wait for a later tick. "unknown" imposes no restriction.
-    pressure = _memory_pressure_level()
+    # Reclaim/promotion already ran. Only new work is deferred, never dropped.
+    memory_pressure = _memory_pressure_level()
+    pressure = host_pressure(memory_pressure, spawn_budget, load_guard, _host_pressure_sample, _kb._log)
+    source = "system memory" if pressure == memory_pressure else "host"
     if pressure == "critical":
-        result.memory_pressure = pressure
+        result.memory_pressure = memory_pressure if memory_pressure in ("critical", "elevated") else None
         _kb._log.warning(
-            "kanban dispatch: system memory pressure is critical; "
-            "spawning no new workers this tick (deferred, not dropped)"
+            "kanban dispatch: %s pressure is critical; "
+            "spawning no new workers this tick (deferred, not dropped)", source,
         )
         return False, None
     if pressure == "elevated":
-        result.memory_pressure = pressure
+        result.memory_pressure = memory_pressure if memory_pressure == "elevated" else None
         if spawn_budget is None or spawn_budget > 1:
             _kb._log.warning(
-                "kanban dispatch: system memory pressure is elevated; "
-                "limiting to at most 1 new worker this tick"
+                "kanban dispatch: %s pressure is elevated; "
+                "limiting to at most 1 new worker this tick", source,
             )
             spawn_budget = 1
     return True, spawn_budget
@@ -2366,6 +2361,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    load_guard: Optional[dict] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2379,6 +2375,7 @@ def _dispatch_once_locked(
     )
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
+        load_guard=load_guard,
     )
     if not may_spawn:
         return result
@@ -2935,6 +2932,8 @@ def run_daemon(
                 with contextlib.suppress(ValueError, OSError):
                     signal.signal(sig, _handle)
 
+    from hermes_cli.kanban_host_pressure import configured_load_guard
+    load_guard = configured_load_guard()  # frozen at daemon boot, like the gateway
     while not stop_event.is_set():
         try:
             # Re-resolved every tick (config load is mtime-cached) so operator
@@ -2946,6 +2945,7 @@ def run_daemon(
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
+                    load_guard=load_guard,
                 )
             if on_tick is not None:
                 with contextlib.suppress(Exception):
