@@ -37,6 +37,12 @@ def test_finished_owner_state_wins_over_lost_finished_ack(tmp_path, monkeypatch)
                                    generation=0, adoption_secret=claim)
         monkeypatch.setattr(persistence, 'authority_persistence', lambda _: db)
         assert not managed._owner_finished(None, scope)
+        # Revoking after a real append makes a terminal row with last_sequence > 0,
+        # but it is still not an execution.finish receipt.
+        db.worker_executions.persist_operation(
+            **{k: scope[k] for k in ('epoch', 'execution_id', 'session_id', 'generation')},
+            sequence=1, operation='transcript.append',
+            payload={'messages': [{'role': 'user', 'content': 'committed before loss'}], 'turn_lease_holder': None})
         from tests.fixtures.storage_holder import raw_holder
         raw_holder(db)._execute_write(lambda conn: conn.execute(
             "UPDATE worker_executions SET status='terminal' WHERE execution_id='worker'"))
@@ -44,7 +50,7 @@ def test_finished_owner_state_wins_over_lost_finished_ack(tmp_path, monkeypatch)
         raw_holder(db)._execute_write(lambda conn: conn.execute(
             "UPDATE worker_executions SET status='running' WHERE execution_id='worker'"))
         db.worker_executions.persist_operation(**{k: scope[k] for k in ('epoch', 'execution_id', 'session_id', 'generation')},
-                                              sequence=1, operation='execution.finish', payload={})
+                                              sequence=2, operation='execution.finish', payload={})
         monkeypatch.setattr(raw_holder(db), '_execute_write', lambda *a, **k: pytest.fail('finish proof must be read-only'))
         assert managed._owner_finished(None, scope)
         assert not managed._owner_finished(None, dict(scope, execution_id='other-worker'))

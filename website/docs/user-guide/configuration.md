@@ -18,7 +18,11 @@ Run `hermes setup --portal` — one OAuth gets you a model provider and all four
 
 ## Worker owner reply recovery
 
-These `kanban` keys tune the owner transport for all managed worker kinds, from the owner's profile home:
+The three `worker_reply_*` keys below are read by workers from the **owning gateway's profile
+home**, supplied in the worker bootstrap, not the assignee's or launching shell's profile.
+Delegated child stores inherit their parent's reply budget. `worker_transport_retry_budget`
+is read separately from **the dispatcher process's active profile** (`get_hermes_home()`),
+which is the profile ticking the board; configure that profile even when cards have other assignees.
 
 ```yaml
 kanban:
@@ -28,13 +32,17 @@ kanban:
   worker_transport_retry_budget: 3   # card-wide strike-free losses, clamped 0–10
 ```
 
-Defaults retain the original single 20-second reply window. With retries enabled, a timeout first
+Defaults retain the original single 20-second reply window, without automatic replay, in parent
+and delegated child stores alike. With retries enabled, a timeout first
 waits on the same correlated request. Only exact receipt-idempotent saves and adoption may replay
 on a fresh connection; a save/adoption can use two bounded groups of reply windows. Arbitrary RPCs
 are never resent. A transport loss is strike-free only with durable evidence that the pre-tool barrier
 was installed and no tool started, while the card's separate transport budget remains. The owner
-atomically fences further tool starts before publishing that proof. Missing proof, any started tool,
-or an exhausted budget uses the normal breaker. Recent-success and active-PR guards still apply.
+atomically fences further tool starts before publishing that proof. Only the Hermes-dispatched
+`chat_completions`, `anthropic_messages` and `codex_responses` runtimes establish this proof.
+`codex_app_server`, external-command runtimes, unknown modes and legacy workers do not.
+Missing proof, any started tool, or an exhausted budget uses the normal breaker.
+Recent-success and active-PR guards still apply.
 Retries back off at least 30 seconds, or the longer existing rate-limit cooldown.
 
 ## Directory Structure

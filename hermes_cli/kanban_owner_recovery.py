@@ -216,7 +216,7 @@ def reclaim_error(conn, task_id, claim_lock) -> str:
 
 
 def transport_retry_budget():
-    from hermes_cli.config_backend import get_config_backend
+    from hermes_cli.config_backend import ConfigBackendUnavailable, get_config_backend
     from hermes_constants import get_hermes_home
     import hermes_yaml as yaml
     try:
@@ -224,7 +224,7 @@ def transport_retry_budget():
         settings = config.get('kanban', {}) if isinstance(config, dict) else {}
         value = settings.get('worker_transport_retry_budget', 3) if isinstance(settings, dict) else 3
         return 3 if isinstance(value, bool) else min(10, max(0, int(value)))
-    except (OSError, UnicodeError, yaml.YAMLError, TypeError, ValueError, OverflowError):
+    except (ConfigBackendUnavailable, OSError, UnicodeError, yaml.YAMLError, TypeError, ValueError, OverflowError):
         return 3
 
 

@@ -62,7 +62,6 @@ def test_managed_worker_lifetime_suppresses_idle_full_gc(monkeypatch):
 
     async def spawn(*args):
         assert queue.quiet_period() == (0.0, None), 'live subprocess was mistaken for idle; full GC can freeze every receipt'
-        return None
 
     monkeypatch.setattr(refs, 'managed_turn_text', text)
     monkeypatch.setattr(managed, '_mark_spawning', lambda *args: None)

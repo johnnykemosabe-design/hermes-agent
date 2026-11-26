@@ -458,7 +458,7 @@ def execute(frame, channel):
                 tool_complete_callback=lambda call_id, name, args, result: channel.send('tool.complete',
                                                                                          **tool_frame(call_id, name, args, result)))
             from agent.worker_safety import ToolBarrier
-            agent._worker_tool_barrier = ToolBarrier(store)
+            agent._worker_tool_barrier = ToolBarrier(store, runtime=getattr(agent, 'api_mode', None))
             controls.agent = agent
             interval = activity_frame_interval(frame)
             if interval is not None:

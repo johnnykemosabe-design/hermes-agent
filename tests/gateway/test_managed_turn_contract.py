@@ -42,11 +42,13 @@ def test_child_executes_under_finite_policy_and_preserves_receipt(tmp_path, monk
     for key in ("HERMES_SESSION_SOURCE", "HERMES_SESSION_SOURCE_EXPLICIT", "HERMES_SINGLE_QUERY_SESSION"):
         monkeypatch.delenv(key, raising=False)
     observed, frames, scopes, cache_ttls, adaptive = [], [], [], [], []
+    guards = []
 
     class Agent:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             self.platform = kwargs.get('platform')
+            self.api_mode = 'chat_completions'
             self._anthropic_prompt_cache_policy = lambda: (True, True)
             _init_prompt_cache_config(self)
             cache_ttls.append(self._cache_ttl)
@@ -68,6 +70,10 @@ def test_child_executes_under_finite_policy_and_preserves_receipt(tmp_path, monk
 
     class Store:
         def __init__(self, *args): pass
+        def _apply(self, operation, payload):
+            assert operation == 'execution.tool_guard' and payload == {}
+            guards.append(operation)
+            return {'value': None}
         def get_messages_as_conversation(self, sid): return []
         def flush_token_counts(self): pass
         def finish(self): pass
@@ -94,6 +100,7 @@ def test_child_executes_under_finite_policy_and_preserves_receipt(tmp_path, monk
     worker.execute(frame, SimpleNamespace(send=lambda kind, **payload: frames.append({'type': kind, **payload})))
     # Both start on 5m; only the person's (non-finite) chat is marked to move to 1h at its first pause.
     assert cache_ttls == ['5m'] and adaptive == [not finite]
+    assert guards == ['execution.tool_guard']
     assert observed == [(finite, unattended, unattended)]
     # The worker's one turn runs under the fence its owner claimed it with.
     assert [(s.session, s.turn, s.fence) for s in scopes] == [('sid', 'x', Fence(3, 8))]

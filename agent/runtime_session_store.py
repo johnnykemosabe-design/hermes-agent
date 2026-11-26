@@ -128,10 +128,12 @@ class WorkerReplyBudget:
     def for_home(cls, home):
         # Read exactly the worker's owner home, never the launch profile's config.
         import hermes_yaml as yaml
-        from hermes_cli.config_backend import get_config_backend
+        from hermes_cli.config_backend import ConfigBackendUnavailable, get_config_backend
         try:
             config = get_config_backend().read_user_doc(Path(home))
-        except (OSError, UnicodeError, yaml.YAMLError):
+        except FileNotFoundError:
+            config = {}
+        except (ConfigBackendUnavailable, OSError, UnicodeError, yaml.YAMLError):
             # No config text in diagnostics: it may contain credentials.
             logger.warning('worker reply budget config unreadable; using defaults')
             config = {}
@@ -280,8 +282,9 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
     # The process's async-delegation ledger belongs to the adopted execution, never a reserved child.
     binds_delegation_ledger = True
 
-    def __init__(self, rpc, scope, outbox_dir, adopted=None, *, max_bytes=4 * 1024 * 1024):
+    def __init__(self, rpc, scope, outbox_dir, adopted=None, *, max_bytes=4 * 1024 * 1024, reply_budget=None):
         self.rpc = rpc
+        self.reply_budget = reply_budget if reply_budget is not None else getattr(rpc, 'reply_budget', WorkerReplyBudget())
         self.scope = dict(scope)
         self.max_bytes = max_bytes
         self.lock = threading.RLock()
@@ -396,7 +399,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                     try:
                         result = self.rpc('worker.persist', **self.scope, **entry)
                     except TimeoutError:
-                        if isinstance(self.rpc, WorkerRPC) and not self.rpc.reply_budget.retries:
+                        if not self.reply_budget.retries:
                             raise
                         # The owner may have committed before its ACK missed the budget.
                         # Exact sequence + payload replay FIRST reads the durable receipt

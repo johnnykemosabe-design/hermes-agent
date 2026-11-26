@@ -54,4 +54,5 @@ def reserve_child_store(parent, *, persistence=None):
     # Every child RPC hops off a running loop, not only this reservation: the child is built, run
     # and closed inside delegate_task's callback, and its constructor already reads the store
     # (ContextCompressor.bind_session_state), which WorkerRPC refuses on Relay's loop.
-    return ChildSessionStore(partial(call_off_event_loop, parent.rpc), scope, outbox)
+    return ChildSessionStore(partial(call_off_event_loop, parent.rpc), scope, outbox,
+                             reply_budget=getattr(parent, 'reply_budget', None))

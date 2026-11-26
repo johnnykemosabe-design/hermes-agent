@@ -13,8 +13,7 @@ from tests.fixtures.storage_seed import seed_session
 from tests.gateway.fixtures.storage_handles import close_storage_handles, storage_handle
 
 
-@pytest.mark.parametrize('lost_acks', [1, 2])
-def test_lost_ack_reopens_owner_and_replays_same_ledger_receipt(tmp_path, lost_acks):
+def test_lost_ack_reopens_owner_and_replays_same_ledger_receipt(tmp_path):
     from gateway.session_worker_delegation import persist_worker_delegation
     db = storage_handle(tmp_path)
     seed_session(db, 'parent', 'cli')
@@ -24,7 +23,7 @@ def test_lost_ack_reopens_owner_and_replays_same_ledger_receipt(tmp_path, lost_a
                                   generation=0, kind='compute', adoption_secret='private')
     scope = dict(epoch=epoch, execution_id='worker', session_id='parent', generation=0,
                  pid=os.getpid(), birth=worker_birth(psutil.Process()))
-    lost = [True] * lost_acks
+    lost = [True]
     def rpc(method, **params):
         assert method == 'worker.persist'
         pid, birth = params.pop('pid'), params.pop('birth')
@@ -36,13 +35,6 @@ def test_lost_ack_reopens_owner_and_replays_same_ledger_receipt(tmp_path, lost_a
     try:
         payload = dict(delegation_id='deleg_owned', task={'goal': 'inert'}, dispatched_at=time.time(),
                        parent_session_id='parent', session_key='', origin_ui_session_id='', origin_session_id='')
-        if lost_acks == 1:
-            assert store._apply('delegation.dispatch', payload) == {'value': None}
-            assert not store.journal['pending']
-            with raw_holder(db)._read_ctx() as conn:
-                assert conn.execute('SELECT COUNT(*) FROM async_delegations').fetchone()[0] == 1
-                assert conn.execute('SELECT COUNT(*) FROM worker_receipts').fetchone()[0] == 1
-            return
         with pytest.raises(TimeoutError, match='lost_ack'):
             store._apply('delegation.dispatch', payload)
         db.close()
