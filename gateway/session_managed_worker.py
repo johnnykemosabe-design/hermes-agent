@@ -574,22 +574,8 @@ def _record_lost_attempt(authority, policy, exc, reason, scope):
         return None
     from gateway.session_kanban import record_worker_loss
     from gateway.session_runtime_workers import track_mutation
-    return track_mutation(authority, asyncio.to_thread(partial(_fenced_loss_note, authority, policy, reason, scope)))
-
-
-def _fenced_loss_note(authority, policy, reason, scope):
-    from gateway.session_kanban import record_worker_loss
-    from persistence.core.errors import STORE_FAILURES
-    no_tools = False
-    if scope is not None and reason == 'worker_transport_timeout':
-        try:
-            from gateway.session_persistence import authority_persistence
-            no_tools = authority_persistence(authority).worker_executions.fence_for_loss(
-                **{key: scope[key] for key in ('epoch', 'execution_id', 'session_id', 'generation')})
-        except (AuthorityRefusal, *STORE_FAILURES):
-            pass  # No proof: never exempt a strike on an unavailable ledger.
-    record_worker_loss(policy, reason, pid=(scope or {}).get('pid'), bound=scope is not None,
-                       no_tool_started=no_tools)
+    return track_mutation(authority, asyncio.to_thread(partial(record_worker_loss, policy, reason,
+                                                               pid=(scope or {}).get('pid'), bound=scope is not None)))
 
 
 async def _settle_lost(authority, row, scope, recording):

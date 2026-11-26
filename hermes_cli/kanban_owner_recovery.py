@@ -215,25 +215,6 @@ def reclaim_error(conn, task_id, claim_lock) -> str:
     return f"stale_lock={claim_lock}" + (f" [{note}]" if note else "")
 
 
-def transport_retry_budget():
-    from hermes_cli.config_backend import ConfigBackendUnavailable, get_config_backend
-    from hermes_constants import get_hermes_home
-    import hermes_yaml as yaml
-    try:
-        config = get_config_backend().read_user_doc(get_hermes_home())
-        settings = config.get('kanban', {}) if isinstance(config, dict) else {}
-        value = settings.get('worker_transport_retry_budget', 3) if isinstance(settings, dict) else 3
-        return 3 if isinstance(value, bool) else min(10, max(0, int(value)))
-    except (ConfigBackendUnavailable, OSError, UnicodeError, yaml.YAMLError, TypeError, ValueError, OverflowError):
-        return 3
-
-
-def _transport_budget_available(conn, task_id):
-    used = conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='transport_timeout'",
-                        (task_id,)).fetchone()[0]
-    return used < transport_retry_budget()
-
-
 def apply_attempt_note(conn, task_id, pid, dead) -> None:
     """Fold the owner's own record of how the attempt ended into ONE dead worker's booking.
 
@@ -249,16 +230,6 @@ def apply_attempt_note(conn, task_id, pid, dead) -> None:
     dead.event_payload["attempt_note"] = note
     if lost:
         dead.event_payload["worker_lost"] = lost
-        if (lost.get('reason') == 'worker_transport_timeout'
-                and lost.get('no_tool_started') is True and _transport_budget_available(conn, task_id)):
-            dead.transport_timeout = True
-            dead.protocol_violation = False
-            dead.event_payload.pop('protocol_violation', None)
-            dead.event_payload['infrastructure'] = True
-            dead.event_kind = 'transport_timeout'
-            from hermes_cli.kanban_db_dispatch import _PROTOCOL_VIOLATION_ERROR
-            dead.error_text = ('Worker owner transport timed out before tool work started.'
-                               + dead.error_text.removeprefix(_PROTOCOL_VIOLATION_ERROR))
         if dead.protocol_violation:
             from hermes_cli.kanban_db_dispatch import _PROTOCOL_VIOLATION_ERROR
             dead.protocol_violation = False
@@ -327,35 +298,3 @@ def managed_run_exit_code(conn, task_id, worker_pid, claim_lock):
     result, bound = latest('worker_result'), latest('worker_bound')
     pids = {worker_pid, *([bound.get('pid')] if bound.get('claim_lock') == claim_lock else [])}
     return result.get('exit_code') if result.get('claim_lock') == claim_lock and result.get('pid') in pids else None
-
-
-def protocol_violation_streak(conn, task_id):
-    """Count the task's trailing run of clean-exit protocol violations.
-
-    Walks closed runs newest-first (including the one ``detect_crashed_workers``
-    just closed). ``rate_limited`` runs are neutral and skipped (a quota wall
-    says nothing about the task); any other closed run breaks the streak, so
-    the budget counts ONLY protocol violations. Violations are recognized by the
-    ``protocol_violation`` run-metadata marker, with the error text as fallback
-    for runs recorded before the marker existed.
-    """
-    from hermes_cli import kanban_db as _kb
-    from hermes_cli.kanban_db_dispatch import _PROTOCOL_VIOLATION_SCAN_LIMIT, WORKER_OUTPUT_SEP
-    streak = 0
-    rows = conn.execute(
-        "SELECT outcome, error, metadata FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY id DESC LIMIT ?",
-        (task_id, _PROTOCOL_VIOLATION_SCAN_LIMIT),
-    ).fetchall()
-    for row in rows:
-        outcome = row["outcome"] or ""
-        if outcome == "rate_limited":
-            continue
-        head = (row["error"] or "").partition(WORKER_OUTPUT_SEP)[0]  # never the worker's own words
-        if outcome == "crashed" and (
-                _kb._json_dict(row["metadata"]).get("protocol_violation") or "protocol violation" in head):
-            streak += 1
-            continue
-        break
-    return streak

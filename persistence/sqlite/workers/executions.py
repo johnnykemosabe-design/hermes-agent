@@ -201,11 +201,6 @@ class SQLiteWorkerExecutionRepository:
         with refused():
             return committed_finish(self._store.holder(), **scope)
 
-    def fence_for_loss(self, **scope) -> bool:
-        from .loss import fence_for_loss
-        with refused():
-            return fence_for_loss(self._store.holder(), **scope)
-
     def has_live_worker(self) -> bool:
         with refused():
             return _gateway.has_live_worker(self._store.holder())

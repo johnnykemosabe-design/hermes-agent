@@ -8,12 +8,9 @@ refuses any unknown operation. Handlers take the store holder and the transactio
 
 import json
 
-from functools import partial
-
 from persistence.authority.vocabulary import admission_fingerprint
 from persistence.core.errors import AuthorityRefusal
 from persistence.workers.vocabulary import WORKER_MESSAGE_FIELDS, row_annotations
-from .loss import tool_guard
 
 from ..authority._runtime import _epoch, _json, _text
 
@@ -141,8 +138,6 @@ def mutate_worker_execution(holder, *, epoch, execution_id, session_id, generati
         'session.row_role': worker_row_role,
         'transcript.append': _worker_append,
         'execution.finish': _worker_finish,
-        **{name: partial(tool_guard, execution_id=execution_id, started=started)
-           for name, started in [('execution.tool_guard', False), ('execution.tool_start', True)]},
         'usage.main': _worker_usage,
         'usage.auxiliary': lambda holder, conn, sid, p: _worker_usage(holder, conn, sid, p, auxiliary=True),
         **{name: (lambda holder, conn, sid, p, op=name: _worker_turn(holder, conn, sid, p, op))

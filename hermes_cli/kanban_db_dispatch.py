@@ -941,7 +941,34 @@ _PROTOCOL_VIOLATION_FAILURE_LIMIT = 3
 _PROTOCOL_VIOLATION_SCAN_LIMIT = 50
 
 
-from hermes_cli.kanban_owner_recovery import protocol_violation_streak as _protocol_violation_streak
+def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
+    """Count the task's trailing run of clean-exit protocol violations.
+
+    Walks closed runs newest-first (including the one ``detect_crashed_workers``
+    just closed). ``rate_limited`` runs are neutral and skipped (a quota wall
+    says nothing about the task); any other closed run breaks the streak, so
+    the budget counts ONLY protocol violations. Violations are recognized by the
+    ``protocol_violation`` run-metadata marker, with the error text as fallback
+    for runs recorded before the marker existed.
+    """
+    streak = 0
+    rows = conn.execute(
+        "SELECT outcome, error, metadata FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT ?",
+        (task_id, _PROTOCOL_VIOLATION_SCAN_LIMIT),
+    ).fetchall()
+    for row in rows:
+        outcome = row["outcome"] or ""
+        if outcome == "rate_limited":
+            continue
+        head = (row["error"] or "").partition(WORKER_OUTPUT_SEP)[0]  # never the worker's own words
+        if outcome == "crashed" and (
+                _kb._json_dict(row["metadata"]).get("protocol_violation") or "protocol violation" in head):
+            streak += 1
+            continue
+        break
+    return streak
 
 
 WORKER_OUTPUT_SEP = " Worker's last output: "  # dead-worker error text: our words, then the worker's
@@ -1022,7 +1049,6 @@ class _DeadWorker:
     protocol_violation: bool = False
     rate_limited: bool = False
     terminal_provider: bool = False
-    transport_timeout: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
 
@@ -1030,8 +1056,6 @@ class _DeadWorker:
     def run_outcome(self) -> str:
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
         # doesn't show a phantom crash for a quota wall.
-        if self.transport_timeout:
-            return "transport_timeout"
         return "rate_limited" if self.rate_limited else "crashed"
 
 
@@ -1199,7 +1223,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation or dead.transport_timeout:
+            if dead.rate_limited or dead.protocol_violation:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
@@ -1209,9 +1233,6 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
-            if dead.transport_timeout:
-                # Host transport loss is never fed to the systemic-failure breaker.
-                continue
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
             else:
@@ -1578,13 +1599,6 @@ def check_respawn_guard(
     ).fetchone()
     infrastructure = (latest_run is not None and latest_run["outcome"] == "spawn_failed"
                       and bool(_kb._json_dict(latest_run["metadata"]).get("infrastructure")))
-    transport = latest_run is not None and latest_run['outcome'] == 'transport_timeout'
-    if transport:
-        # Always back off even when the quota cooldown is disabled. Persisted run time
-        # makes the delay survive dispatcher restarts; a newer real failure supersedes it.
-        ended = _kb._to_epoch(latest_run['ended_at'])
-        if ended is not None and now - ended < max(30, rl_cooldown):
-            return 'infrastructure_cooldown'
     ended_at = _kb._to_epoch(latest_run["ended_at"]) if infrastructure else None
     if rl_cooldown > 0 and ended_at is not None and (now - ended_at) < rl_cooldown:
         return "infrastructure_cooldown"
@@ -1607,7 +1621,7 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and not infrastructure and not transport and _RESPAWN_BLOCKER_RE.search(err):
+    if err and latest_outcome != "crashed" and not infrastructure and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL

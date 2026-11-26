@@ -124,27 +124,6 @@ class _Board:
                                  stale_timeout_seconds=0)
 
 
-# --- Transport loss is host infrastructure, not a task strike ----------------------------
-
-
-def test_transport_timeout_storm_requeues_without_spending_any_strikes(board):
-    runs = [board.running(f't_transport_{n}', worker_lost='worker_transport_timeout') for n in range(3)]
-    for n in range(3):
-        from tests.hermes_cli.test_worker_transport_budget import proof
-        proof(board, f't_transport_{n}', True)
-        board.conn.execute('UPDATE tasks SET max_retries=1 WHERE id=?', (f't_transport_{n}',))
-    board.conn.commit()
-    board.tick(failure_limit=1)
-    for n, run_id in enumerate(runs):
-        tid = f't_transport_{n}'
-        row, run = board.state(tid), board.run(run_id)
-        assert row['status'] == 'ready'
-        assert row['consecutive_failures'] == 0
-        assert run['outcome'] == 'transport_timeout'
-        assert kbd.check_respawn_guard(board.conn, tid) == 'infrastructure_cooldown'
-        assert not board.conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='gave_up'", (tid,)).fetchone()
-
-
 # --- A1: a killed worker under a LIVE claim is booked crashed within one tick --------------
 
 def test_a_killed_managed_worker_is_disposed_of_within_one_tick(board):

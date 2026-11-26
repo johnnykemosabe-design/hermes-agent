@@ -43,9 +43,6 @@ def _execute(frame, monkeypatch, base=object, built=None, result=None, sent=None
 
     class Store:
         def __init__(self, *args): pass
-        def _apply(self, operation, payload):
-            assert operation == "execution.tool_guard" and payload == {}
-            return {"value": None}
         def get_messages_as_conversation(self, sid): return []
         def flush_token_counts(self): pass
         def finish(self): pass

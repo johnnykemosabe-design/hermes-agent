@@ -1851,7 +1851,7 @@ DEFAULT_CONFIG = {
         "worker_log_backup_count": 1,
         # Owner-home RPC windows (all worker kinds); retry opt-in and bounds: configuration docs.
         "worker_reply_timeout_seconds": 20.0, "worker_reply_retries": 0,
-        "worker_reply_backoff_seconds": 1.0, "worker_transport_retry_budget": 3,
+        "worker_reply_backoff_seconds": 1.0,
         # Post-Triage root profile ("" = default), not the decomposer LLM (auxiliary.kanban_decomposer).
         "orchestrator_profile": "",
         # Fallback assignee ("" = default profile); tasks never have assignee=None.

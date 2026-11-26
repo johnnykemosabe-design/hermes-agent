@@ -42,9 +42,6 @@ def test_worker_stop_hard_cancels_the_agent_before_and_after_construction(tmp_pa
 
     class Store:
         def __init__(self, *args): pass
-        def _apply(self, operation, payload):
-            assert operation == "execution.tool_guard" and payload == {}
-            return {"value": None}
         def get_messages_as_conversation(self, sid): return []
         def flush_token_counts(self): pass
         def finish(self): pass
