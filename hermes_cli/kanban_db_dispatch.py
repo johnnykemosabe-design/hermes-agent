@@ -941,34 +941,7 @@ _PROTOCOL_VIOLATION_FAILURE_LIMIT = 3
 _PROTOCOL_VIOLATION_SCAN_LIMIT = 50
 
 
-def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
-    """Count the task's trailing run of clean-exit protocol violations.
-
-    Walks closed runs newest-first (including the one ``detect_crashed_workers``
-    just closed). ``rate_limited`` runs are neutral and skipped (a quota wall
-    says nothing about the task); any other closed run breaks the streak, so
-    the budget counts ONLY protocol violations. Violations are recognized by the
-    ``protocol_violation`` run-metadata marker, with the error text as fallback
-    for runs recorded before the marker existed.
-    """
-    streak = 0
-    rows = conn.execute(
-        "SELECT outcome, error, metadata FROM task_runs "
-        "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY id DESC LIMIT ?",
-        (task_id, _PROTOCOL_VIOLATION_SCAN_LIMIT),
-    ).fetchall()
-    for row in rows:
-        outcome = row["outcome"] or ""
-        if outcome == "rate_limited":
-            continue
-        head = (row["error"] or "").partition(WORKER_OUTPUT_SEP)[0]  # never the worker's own words
-        if outcome == "crashed" and (
-                _kb._json_dict(row["metadata"]).get("protocol_violation") or "protocol violation" in head):
-            streak += 1
-            continue
-        break
-    return streak
+from hermes_cli.kanban_owner_recovery import protocol_violation_streak as _protocol_violation_streak
 
 
 WORKER_OUTPUT_SEP = " Worker's last output: "  # dead-worker error text: our words, then the worker's
@@ -1612,7 +1585,6 @@ def check_respawn_guard(
         ended = _kb._to_epoch(latest_run['ended_at'])
         if ended is not None and now - ended < max(30, rl_cooldown):
             return 'infrastructure_cooldown'
-        return None
     ended_at = _kb._to_epoch(latest_run["ended_at"]) if infrastructure else None
     if rl_cooldown > 0 and ended_at is not None and (now - ended_at) < rl_cooldown:
         return "infrastructure_cooldown"
@@ -1635,7 +1607,7 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and not infrastructure and _RESPAWN_BLOCKER_RE.search(err):
+    if err and latest_outcome != "crashed" and not infrastructure and not transport and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL

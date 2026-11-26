@@ -289,6 +289,7 @@ CREATE TABLE IF NOT EXISTS worker_executions (
     generation INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('registered','running','unknown','terminal')),
     adoption_digest TEXT NOT NULL,
+    tool_work_state INTEGER CHECK (tool_work_state IN (0,1)),
     last_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_sequence >= 0)
 );
 -- Lineage-wide worker exclusion (claim/register/reset) probes every row of a conversation's lineage

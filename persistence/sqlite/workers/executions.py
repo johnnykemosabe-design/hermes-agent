@@ -196,6 +196,16 @@ class SQLiteWorkerExecutionRepository:
             session_id = _gateway.execution_session(self._store.holder(), execution_id)
         return None if session_id is None else SessionId(session_id)
 
+    def committed_finish(self, **scope) -> bool:
+        from .loss import committed_finish
+        with refused():
+            return committed_finish(self._store.holder(), **scope)
+
+    def fence_for_loss(self, **scope) -> bool:
+        from .loss import fence_for_loss
+        with refused():
+            return fence_for_loss(self._store.holder(), **scope)
+
     def has_live_worker(self) -> bool:
         with refused():
             return _gateway.has_live_worker(self._store.holder())

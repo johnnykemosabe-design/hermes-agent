@@ -34,6 +34,9 @@ def test_managed_worker_agent_gets_the_session_provider_routing(tmp_path, monkey
 
     class Store:
         def __init__(self, *args): pass
+        def _apply(self, operation, payload):
+            assert operation == "execution.tool_guard" and payload == {}
+            return {"value": None}
         def get_messages_as_conversation(self, sid): return []
         def flush_token_counts(self): pass
         def finish(self): pass

@@ -130,6 +130,8 @@ class _Board:
 def test_transport_timeout_storm_requeues_without_spending_any_strikes(board):
     runs = [board.running(f't_transport_{n}', worker_lost='worker_transport_timeout') for n in range(3)]
     for n in range(3):
+        from tests.hermes_cli.test_worker_transport_budget import proof
+        proof(board, f't_transport_{n}', True)
         board.conn.execute('UPDATE tasks SET max_retries=1 WHERE id=?', (f't_transport_{n}',))
     board.conn.commit()
     board.tick(failure_limit=1)

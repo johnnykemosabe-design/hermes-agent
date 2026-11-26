@@ -574,8 +574,22 @@ def _record_lost_attempt(authority, policy, exc, reason, scope):
         return None
     from gateway.session_kanban import record_worker_loss
     from gateway.session_runtime_workers import track_mutation
-    return track_mutation(authority, asyncio.to_thread(partial(record_worker_loss, policy, reason,
-                                                               pid=(scope or {}).get('pid'), bound=scope is not None)))
+    return track_mutation(authority, asyncio.to_thread(partial(_fenced_loss_note, authority, policy, reason, scope)))
+
+
+def _fenced_loss_note(authority, policy, reason, scope):
+    from gateway.session_kanban import record_worker_loss
+    from persistence.core.errors import STORE_FAILURES
+    no_tools = False
+    if scope is not None and reason == 'worker_transport_timeout':
+        try:
+            from gateway.session_persistence import authority_persistence
+            no_tools = authority_persistence(authority).worker_executions.fence_for_loss(
+                **{key: scope[key] for key in ('epoch', 'execution_id', 'session_id', 'generation')})
+        except (AuthorityRefusal, *STORE_FAILURES):
+            pass  # No proof: never exempt a strike on an unavailable ledger.
+    record_worker_loss(policy, reason, pid=(scope or {}).get('pid'), bound=scope is not None,
+                       no_tool_started=no_tools)
 
 
 async def _settle_lost(authority, row, scope, recording):
@@ -702,14 +716,17 @@ def _owner_finished(authority, scope):
         return False
     if row.status != 'terminal' or row.owner_epoch != scope['epoch'] or row.last_sequence < 1:
         return False
-    try:
-        # Terminal alone also means revoked/lost. Replaying the terminal sequence
-        # must read an execution.finish receipt, never manufacture a successful finish.
-        repo.finish(epoch=scope['epoch'], execution_id=row.execution_id, session_id=row.session_id,
-                    generation=row.generation, sequence=row.last_sequence)
-    except AuthorityRefusal:
+    return repo.committed_finish(epoch=scope['epoch'], execution_id=row.execution_id, session_id=row.session_id,
+                                 generation=row.generation, sequence=row.last_sequence)
+
+
+async def _reconcile_finished(authority, scope, accepted, reason):
+    if scope is None or accepted is None or reason != 'worker_transport_timeout':
         return False
-    return True
+    try:
+        return await asyncio.to_thread(_owner_finished, authority, scope)
+    except Exception:  # health: allow BLE001 -- an unprovable finish must take the loss/unknown/revoke path
+        return False
 
 
 async def _complete_managed(authority, row, scope, accepted, usage, worker):
@@ -731,6 +748,19 @@ async def execute_managed(authority, ref, row, policy):
         return await _execute_managed(authority, ref, row, policy)
     finally:
         QUEUE.note_turn_finished()
+
+
+def _publish_lost_execution(authority, ref, row):
+    live = authority.sessions[ref.session_id]
+    with live.event_stream.lock:
+        live.controls.snapshot(ref.session_id, None)
+        authority._publish_pending(ref)
+        live.event_stream.publish(ref.session_id, {'text': 'Worker execution is unknown.',
+            'content': 'Worker execution is unknown.', 'admission_id': row['admission_id'], 'outcome': 'unknown',
+            'status': 'error'})  # the message.complete TurnStatus: never painted as a normal finish
+    waiter = authority.waiters.pop(row['admission_id'], None)
+    if waiter is not None and not waiter.done():
+        waiter.set_result('Worker execution is unknown.')
 
 
 async def _execute_managed(authority, ref, row, policy):
@@ -815,8 +845,7 @@ async def _execute_managed(authority, ref, row, policy):
         import logging
         from storage_user_copy import error_type_name
         reason = exc.reason if isinstance(exc, AuthorityRefusal) else error_type_name(exc)
-        if (scope is not None and accepted is not None and reason == 'worker_transport_timeout'
-                and await asyncio.to_thread(_owner_finished, authority, scope)):
+        if await _reconcile_finished(authority, scope, accepted, reason):
             # execution.finish committed even though neither its RPC ACK nor finished
             # pipe frame arrived. Do not overwrite that durable terminal with unknown.
             return await _complete_managed(authority, row, scope, accepted, usage, worker)
@@ -830,16 +859,7 @@ async def _execute_managed(authority, ref, row, policy):
             _record_lost_attempt(authority, policy, exc, reason, scope)  # nothing bound: a late note is dropped, never misbooked
             raise
         await _settle_lost(authority, row, scope, _record_lost_attempt(authority, policy, exc, reason, scope))
-        live = authority.sessions[ref.session_id]
-        with live.event_stream.lock:
-            live.controls.snapshot(ref.session_id, None)
-            authority._publish_pending(ref)
-            live.event_stream.publish(ref.session_id, {'text': 'Worker execution is unknown.',
-                'content': 'Worker execution is unknown.', 'admission_id': row['admission_id'], 'outcome': 'unknown',
-                'status': 'error'})  # the message.complete TurnStatus: never painted as a normal finish
-        waiter = authority.waiters.pop(row['admission_id'], None)
-        if waiter is not None and not waiter.done():
-            waiter.set_result('Worker execution is unknown.')
+        _publish_lost_execution(authority, ref, row)
         # Stop this drain without its ordinary Exception→failed settlement. The
         # committed unknown row deliberately pauses every accepted follower.
         raise ManagedExecutionUnknown('managed_worker_unknown') from exc

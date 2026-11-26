@@ -1,7 +1,6 @@
 """Worker saves must not hold the owner loop or falsely advertise a quiet process."""
 import asyncio
 import threading
-import time
 from types import SimpleNamespace
 
 from agent.review_idle_queue import ReviewIdleQueue
@@ -13,15 +12,18 @@ def test_worker_claim_io_does_not_block_concurrent_receipts(monkeypatch):
     monkeypatch.setattr(authorities, 'require_serving', lambda authority: None)
     owner_thread = threading.get_ident()
     threads = []
+    entered, release = threading.Event(), threading.Event()
 
     def slow_claim(*args):
         threads.append(threading.get_ident())
-        time.sleep(.08)
+        assert threading.get_ident() != owner_thread
+        entered.set()
+        assert release.wait(10), 'loop never released claim I/O'
         return 'claim'
 
     def slow_verify(*args):
         threads.append(threading.get_ident())
-        time.sleep(.08)
+        assert threading.get_ident() != owner_thread
 
     monkeypatch.setattr(worker, '_claim', slow_claim)
     monkeypatch.setattr(worker, '_verify', slow_verify)
@@ -32,12 +34,12 @@ def test_worker_claim_io_does_not_block_concurrent_receipts(monkeypatch):
     params['operation'] = 'transcript.append'
 
     async def scenario():
-        started = time.monotonic()
         save = asyncio.create_task(worker.worker_request(connection, None, params, operation='persist'))
-        await asyncio.sleep(.01)
-        lag = time.monotonic() - started
+        try:
+            assert await asyncio.to_thread(entered.wait, 10), 'claim did not enter'
+        finally:
+            release.set()
         assert await save == {'saved': True}
-        assert lag < .08, f'owner loop blocked for {lag:.3f}s'
     asyncio.run(scenario())
     assert threads and all(t != owner_thread for t in threads)
 

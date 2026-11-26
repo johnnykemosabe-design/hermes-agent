@@ -36,6 +36,10 @@ time.sleep(60)  # interpreter teardown that outlives the owner's exit wait
 @pytest.mark.platforms("linux")
 @pytest.mark.parametrize(('exit_shape', 'rotate'), [('nonzero', False), ('lingering', False), ('nonzero', True)])
 def test_finished_worker_keeps_its_result_on_slow_or_nonzero_exit(tmp_path, monkeypatch, exit_shape, rotate):
+    return exercise_finished_worker(tmp_path, monkeypatch, exit_shape, rotate)
+
+
+def exercise_finished_worker(tmp_path, monkeypatch, exit_shape, rotate):
     from gateway import session_managed_worker as managed
     from gateway.session_authority import LiveSession, SessionAuthority, admission_row
     from gateway.session_contract import Submission

@@ -1,8 +1,9 @@
 """Concurrent real RPC readers against a deliberately stalled asyncio owner.
 
 CLI compares any checkout with this same harness; no gateway, profiles, or LLMs.
-The adapter scales only the reply clock (20s -> 100ms) to keep CI fast. The
-server, WebSockets, reader threads and SQLite worker receipts are real.
+The controller expires the first reply window only after every save commits,
+then releases the real stalled loop only when every worker retries or exits.
+WebSockets, reader threads and SQLite receipts are real; no timing margin is used.
 """
 import argparse
 import asyncio
@@ -12,7 +13,6 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
-import time
 
 
 def reproduce(root, workers=10):
@@ -41,6 +41,10 @@ def reproduce(root, workers=10):
             scopes.append(scope)
         started = threading.Event()
         ready = {}
+        committed, release = threading.Event(), threading.Event()
+        arrivals = threading.Barrier(workers)
+        retries = threading.Barrier(workers, action=release.set)
+        failures = threading.Barrier(workers, action=release.set)
 
         async def owner():
             all_received = asyncio.Event()
@@ -54,7 +58,8 @@ def reproduce(root, workers=10):
                 if count == workers:
                     all_received.set()
                     # Deliberately emulate an event-loop/GIL pause after all saves commit.
-                    time.sleep(.25)
+                    committed.set()
+                    assert release.wait(30), 'workers neither retried nor exited'
                 await all_received.wait()
                 try:
                     await socket.send(json.dumps({'id': request['id'], 'result': result}))
@@ -71,9 +76,17 @@ def reproduce(root, workers=10):
         thread.start()
         assert started.wait(5), 'fixture server did not start'
 
-        class ScaledReplyClock(_OwnerLink):
+        class ControlledReplyClock(_OwnerLink):
+            first = True
+
             def receive(self, timeout):
-                return super().receive(timeout * .005)
+                if self.first:
+                    self.first = False
+                    assert committed.wait(30), 'saves did not commit'
+                    arrivals.wait(timeout=30)
+                    raise TimeoutError('worker_receipt_timeout')
+                retries.wait(timeout=30)
+                return super().receive(30)
 
         barrier = threading.Barrier(workers)
 
@@ -81,7 +94,7 @@ def reproduce(root, workers=10):
             rpc = WorkerRPC(home)
             socket = connect(f"ws://127.0.0.1:{ready['port']}", proxy=None,
                              open_timeout=5, close_timeout=.1, ping_interval=None)
-            link = ScaledReplyClock(socket)
+            link = ControlledReplyClock(socket)
             rpc.link = link
             rpc._connection = lambda: link
             try:
@@ -90,6 +103,7 @@ def reproduce(root, workers=10):
                     payload={'messages': [{'role': 'user', 'content': 'once'}], 'turn_lease_holder': None})
                 return 0
             except TimeoutError:
+                failures.wait(timeout=30)
                 return 1
             finally:
                 rpc.close()
@@ -100,11 +114,12 @@ def reproduce(root, workers=10):
             receipts = raw_holder(db)._read_one('SELECT COUNT(*) FROM worker_receipts')[0]
             messages = raw_holder(db)._read_one('SELECT COUNT(*) FROM messages')[0]
         finally:
+            release.set()
             ready['loop'].call_soon_threadsafe(ready['stop'].set)
             thread.join(timeout=10)
             assert not thread.is_alive(), 'fixture owner leaked'
     return dict(workers=workers, crashes=crashes, receipts=receipts, messages=messages,
-                loop_stall_seconds=.25, reply_clock_scale=.005)
+                stall_control='events', expired_reply_windows=workers)
 
 
 def test_concurrent_committed_saves_survive_stalled_loop(tmp_path):

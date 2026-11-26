@@ -29,6 +29,9 @@ def _execute(tmp_path, monkeypatch, events, *, start_error=None, close_error=Non
 
     class Store:
         def __init__(self, *args): pass
+        def _apply(self, operation, payload):
+            assert operation == "execution.tool_guard" and payload == {}
+            return {"value": None}
         def get_messages_as_conversation(self, sid): return []
         def flush_token_counts(self): pass
         def finish(self): events.append('store.finish')

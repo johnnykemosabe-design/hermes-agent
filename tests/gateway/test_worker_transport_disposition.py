@@ -45,12 +45,14 @@ def test_finished_owner_state_wins_over_lost_finished_ack(tmp_path, monkeypatch)
             "UPDATE worker_executions SET status='running' WHERE execution_id='worker'"))
         db.worker_executions.persist_operation(**{k: scope[k] for k in ('epoch', 'execution_id', 'session_id', 'generation')},
                                               sequence=1, operation='execution.finish', payload={})
+        monkeypatch.setattr(raw_holder(db), '_execute_write', lambda *a, **k: pytest.fail('finish proof must be read-only'))
         assert managed._owner_finished(None, scope)
         assert not managed._owner_finished(None, dict(scope, execution_id='other-worker'))
     finally:
         db.close()
 
 
+@pytest.mark.platforms('posix')
 @pytest.mark.usefixtures('authority_cwd_in_tmp')
 def test_owner_reconciles_terminal_receipt_when_finished_pipe_frame_is_lost(tmp_path, monkeypatch):
     from gateway import session_managed_worker as managed
@@ -69,7 +71,7 @@ def test_owner_reconciles_terminal_receipt_when_finished_pipe_frame_is_lost(tmp_
         return scope
 
     monkeypatch.setattr(managed, 'reserve_admission_worker', commit_finish)
-    fixture.test_finished_worker_keeps_its_result_on_slow_or_nonzero_exit(tmp_path, monkeypatch, 'nonzero', False)
+    fixture.exercise_finished_worker(tmp_path, monkeypatch, 'nonzero', False)
 
 
 @pytest.mark.usefixtures('authority_cwd_in_tmp')

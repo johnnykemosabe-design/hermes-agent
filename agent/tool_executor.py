@@ -782,6 +782,9 @@ def _run_agent_tool_execution_middleware(
     authorization_gate: _ConcurrentToolAuthorizationGate | None = None,
 ) -> _ManagedToolResult:
     """Run Relay rewrites before Hermes policy and dispatch exactly once."""
+    barrier = getattr(agent, "_worker_tool_barrier", None)
+    if barrier is not None:
+        barrier()
     from agent import relay_tools
     from hermes_cli.middleware import (
         apply_tool_request_middleware,

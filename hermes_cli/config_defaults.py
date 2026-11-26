@@ -1846,23 +1846,15 @@ DEFAULT_CONFIG = {
         # Auto-block after this many consecutive non-success attempts (spawn_failed, timed_out,
         # crashed) for the same task/profile. Reassignment resets the streak.
         "failure_limit": 2,
-        # Worker stdout/stderr log rotation at spawn time (2 MiB + one backup). Raise to keep more
-        # early failure evidence from long-running workers.
+        # Spawn-time stdout/stderr rotation (2 MiB + one backup); raise for more failure evidence.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,
         "worker_log_backup_count": 1,
-        # Worker -> owner RPC receipt windows. Individual wait remains 20s. A timeout
-        # waits again on the SAME request; only receipt-idempotent saves/adoption replay.
-        # Bounds: timeout .01..300s, retries 0..5, exponential backoff 0..10s.
-        # Read from the owner home, not the worker's launch profile. All worker kinds
-        # share this owner transport even though its tuning namespace is Kanban.
-        "worker_reply_timeout_seconds": 20.0,
-        "worker_reply_retries": 2,
-        "worker_reply_backoff_seconds": 1.0,
-        # Profile for the root/orchestration task after Triage decomposition; "" = default profile.
-        # Does not control the decomposer LLM path (see auxiliary.kanban_decomposer).
+        # Owner-home RPC windows (all worker kinds); retry opt-in and bounds: configuration docs.
+        "worker_reply_timeout_seconds": 20.0, "worker_reply_retries": 0,
+        "worker_reply_backoff_seconds": 1.0, "worker_transport_retry_budget": 3,
+        # Post-Triage root profile ("" = default), not the decomposer LLM (auxiliary.kanban_decomposer).
         "orchestrator_profile": "",
-        # Assignee when the orchestrator can't match one to an installed profile; "" = default
-        # profile. A task never ends up with assignee=None.
+        # Fallback assignee ("" = default profile); tasks never have assignee=None.
         "default_assignee": "",
         # Global cap: positive int = the HOST never has more than N tasks 'running' across all
         # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where

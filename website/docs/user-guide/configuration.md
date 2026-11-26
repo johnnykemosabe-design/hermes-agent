@@ -16,6 +16,27 @@ All settings are stored in the `~/.hermes/` directory for easy access.
 Run `hermes setup --portal` — one OAuth gets you a model provider and all four Tool Gateway tools without hand-editing YAML. Portal subscribers also get 10% off token-billed providers. See [Nous Portal](../integrations/nous-portal.md).
 :::
 
+## Worker owner reply recovery
+
+These `kanban` keys tune the owner transport for all managed worker kinds, from the owner's profile home:
+
+```yaml
+kanban:
+  worker_reply_timeout_seconds: 20.0  # per reply window, clamped 0.01–300
+  worker_reply_retries: 0            # extra windows, clamped 0–5; explicit opt-in
+  worker_reply_backoff_seconds: 1.0  # exponential backoff, each sleep clamped 0–10
+  worker_transport_retry_budget: 3   # card-wide strike-free losses, clamped 0–10
+```
+
+Defaults retain the original single 20-second reply window. With retries enabled, a timeout first
+waits on the same correlated request. Only exact receipt-idempotent saves and adoption may replay
+on a fresh connection; a save/adoption can use two bounded groups of reply windows. Arbitrary RPCs
+are never resent. A transport loss is strike-free only with durable evidence that the pre-tool barrier
+was installed and no tool started, while the card's separate transport budget remains. The owner
+atomically fences further tool starts before publishing that proof. Missing proof, any started tool,
+or an exhausted budget uses the normal breaker. Recent-success and active-PR guards still apply.
+Retries back off at least 30 seconds, or the longer existing rate-limit cooldown.
+
 ## Directory Structure
 
 ```text

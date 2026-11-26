@@ -121,16 +121,16 @@ class _OwnerLink:
 @dataclass(frozen=True)
 class WorkerReplyBudget:
     timeout: float = 20.0
-    retries: int = 2
+    retries: int = 0
     backoff: float = 1.0
 
     @classmethod
     def for_home(cls, home):
         # Read exactly the worker's owner home, never the launch profile's config.
         import hermes_yaml as yaml
-        path = Path(home) / 'config.yaml'
+        from hermes_cli.config_backend import get_config_backend
         try:
-            config = yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {}
+            config = get_config_backend().read_user_doc(Path(home))
         except (OSError, UnicodeError, yaml.YAMLError):
             # No config text in diagnostics: it may contain credentials.
             logger.warning('worker reply budget config unreadable; using defaults')
@@ -150,7 +150,7 @@ class WorkerReplyBudget:
             return min(ceiling, max(floor, number)) if math.isfinite(number) else default
 
         return cls(bounded('worker_reply_timeout_seconds', 20.0, 0.01, 300.0),
-                   int(bounded('worker_reply_retries', 2, 0, 5)),
+                   int(bounded('worker_reply_retries', 0, 0, 5)),
                    bounded('worker_reply_backoff_seconds', 1.0, 0.0, 10.0))
 
 
@@ -227,7 +227,7 @@ class WorkerRPC:
                     response = self._exchange(request_id, message)
                 except TimeoutError:
                     self._drop()
-                    if method != 'worker.adopt':
+                    if method != 'worker.adopt' or not self.reply_budget.retries:
                         raise
                     # Exact authenticated adoption replay rereads the committed assignment;
                     # never allocate a fresh identity because its first ACK was late.
@@ -396,6 +396,8 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                     try:
                         result = self.rpc('worker.persist', **self.scope, **entry)
                     except TimeoutError:
+                        if isinstance(self.rpc, WorkerRPC) and not self.rpc.reply_budget.retries:
+                            raise
                         # The owner may have committed before its ACK missed the budget.
                         # Exact sequence + payload replay FIRST reads the durable receipt
                         # (including execution.finish); never allocate a new sequence here.

@@ -231,6 +231,18 @@ class WorkerExecutionRepository(WorkerSessionVerbs, WorkerCompressionRepository,
         """The session an execution is assigned to, ``None`` when there is no such execution (gateway/session_managed_worker.py:492-497, gateway/session_worker_child.py:131-135)."""
         ...
 
+    def committed_finish(self, *, epoch: AuthorityEpoch, execution_id: WorkerExecutionId, session_id: SessionId, generation: ExecutionGeneration, sequence: int) -> bool:
+        """Read-only proof of a terminal row and the exact execution.finish receipt at its last sequence."""
+        ...
+
+    def fence_for_loss(self, *, epoch: AuthorityEpoch, execution_id: WorkerExecutionId, session_id: SessionId, generation: ExecutionGeneration) -> bool:
+        """Atomically fence further worker writes; True only for an installed pre-tool guard with no tool start.
+
+        Epoch and execution generation must match. The execution identity follows session rebinding;
+        an old transcript target does not reset its guard. Missing legacy guard evidence returns False.
+        """
+        ...
+
     def has_live_worker(self) -> bool:
         """Whether any execution is not terminal (gateway/run_idle_exit.py:131)."""
         ...
