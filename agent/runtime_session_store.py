@@ -11,6 +11,9 @@ import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
+import math
+import time
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import queue
@@ -115,6 +118,44 @@ class _OwnerLink:
         return reply
 
 
+@dataclass(frozen=True)
+class WorkerReplyBudget:
+    timeout: float = 20.0
+    retries: int = 0
+    backoff: float = 1.0
+
+    @classmethod
+    def for_home(cls, home):
+        # Read exactly the worker's owner home, never the launch profile's config.
+        import hermes_yaml as yaml
+        from hermes_cli.config_backend import ConfigBackendUnavailable, get_config_backend
+        try:
+            config = get_config_backend().read_user_doc(Path(home))
+        except FileNotFoundError:
+            config = {}
+        except (ConfigBackendUnavailable, OSError, UnicodeError, yaml.YAMLError):
+            # No config text in diagnostics: it may contain credentials.
+            logger.warning('worker reply budget config unreadable; using defaults')
+            config = {}
+        settings = config.get('kanban', {}) if isinstance(config, dict) else {}
+        if not isinstance(settings, dict):
+            settings = {}
+
+        def bounded(key, default, floor, ceiling):
+            value = settings.get(key, default)
+            if isinstance(value, bool):
+                return default
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return default
+            return min(ceiling, max(floor, number)) if math.isfinite(number) else default
+
+        return cls(bounded('worker_reply_timeout_seconds', 20.0, 0.01, 300.0),
+                   int(bounded('worker_reply_retries', 0, 0, 5)),
+                   bounded('worker_reply_backoff_seconds', 1.0, 0.0, 10.0))
+
+
 class WorkerRPC:
     """Bounded authenticated calls to an existing owner; never starts a daemon.
 
@@ -128,6 +169,7 @@ class WorkerRPC:
         self.endpoint = None
         self.link = None
         self.request_id = 0
+        self.reply_budget = WorkerReplyBudget.for_home(self.home)
 
     def _connection(self):
         if self.link is not None:
@@ -178,25 +220,21 @@ class WorkerRPC:
             logger.warning('synchronous_rpc_on_event_loop: %s on thread %s; caller: %s',
                            method, threading.current_thread().name, _caller_summary())
             raise WorkerPersistenceError('synchronous_rpc_on_event_loop')
-        from websockets.exceptions import ConnectionClosed
         with self.lock:
             self.request_id += 1
             request_id = self.request_id
             message = json.dumps({'jsonrpc': '2.0', 'id': request_id, 'method': method, 'params': params})
             try:
-                link = self._connection()
                 try:
-                    link.send(request_id, message)
-                except ConnectionClosed:
-                    # websockets raises this from send only before a complete frame is written (closed
-                    # on entry, or the socket write failed): the owner closed the link after the idle
-                    # check and never saw this request, so redial and send it once more.
+                    response = self._exchange(request_id, message)
+                except TimeoutError:
                     self._drop()
-                    link = self._connection()
-                    link.send(request_id, message)
-                response = link.receive(20)
+                    if method != 'worker.adopt' or not self.reply_budget.retries:
+                        raise
+                    # Exact authenticated adoption replay rereads the committed assignment;
+                    # never allocate a fresh identity because its first ACK was late.
+                    response = self._exchange(request_id, message)
             except BaseException:
-                # Outcome unknown once sent: surface the error and never resend; the next call redials.
                 self._drop()
                 raise
             if 'error' in response:
@@ -205,6 +243,27 @@ class WorkerRPC:
                 global _worker_process
                 _worker_process = True
             return response['result']
+
+
+    def _exchange(self, request_id, message):
+        from websockets.exceptions import ConnectionClosed
+        link = self._connection()
+        try:
+            link.send(request_id, message)
+        except ConnectionClosed:
+            # A send refusal precedes a complete frame: the owner did not receive it.
+            self._drop()
+            link = self._connection()
+            link.send(request_id, message)
+        for attempt in range(self.reply_budget.retries + 1):
+            try:
+                return link.receive(self.reply_budget.timeout)
+            except TimeoutError:
+                if attempt == self.reply_budget.retries:
+                    raise
+                # Wait on the existing request, never replay arbitrary non-idempotent RPCs.
+                time.sleep(min(10.0, self.reply_budget.backoff * 2 ** attempt))
+        raise AssertionError('unreachable reply budget')
 
 
 from agent.runtime_session_compression import RuntimeSessionCompressionMixin
@@ -223,8 +282,9 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
     # The process's async-delegation ledger belongs to the adopted execution, never a reserved child.
     binds_delegation_ledger = True
 
-    def __init__(self, rpc, scope, outbox_dir, adopted=None, *, max_bytes=4 * 1024 * 1024):
+    def __init__(self, rpc, scope, outbox_dir, adopted=None, *, max_bytes=4 * 1024 * 1024, reply_budget=None):
         self.rpc = rpc
+        self.reply_budget = reply_budget if reply_budget is not None else getattr(rpc, 'reply_budget', WorkerReplyBudget())
         self.scope = dict(scope)
         self.max_bytes = max_bytes
         self.lock = threading.RLock()
@@ -336,7 +396,15 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             try:
                 while self.journal['pending']:
                     entry = self.journal['pending'][0]
-                    result = self.rpc('worker.persist', **self.scope, **entry)
+                    try:
+                        result = self.rpc('worker.persist', **self.scope, **entry)
+                    except TimeoutError:
+                        if not self.reply_budget.retries:
+                            raise
+                        # The owner may have committed before its ACK missed the budget.
+                        # Exact sequence + payload replay FIRST reads the durable receipt
+                        # (including execution.finish); never allocate a new sequence here.
+                        result = self.rpc('worker.persist', **self.scope, **entry)
                     candidate = dict(self.journal, pending=self.journal['pending'][1:])
                     candidate = self._compression_receipt_journal(candidate, result)
                     self._save(candidate)
@@ -378,10 +446,14 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             wait_seconds=1800.0, poll_interval_seconds=1.0, on_wait=None,
             wait_notice_interval_seconds=15.0, should_abort=None, acquire_patience_s=0.5,
             on_contended=None):
-        # Reuse only the local polling orchestrator, not the SQLite mixin surface. Same signature
+        # Reuse only the shared polling orchestrator over this store's RPC try. Same signature
         # as the owner's (``on_contended``: a busy-database notice; the RPC try never raises it).
-        from hermes_state_compression import SessionCompressionMixin
-        return SessionCompressionMixin.acquire_session_turn_lease(self, session_id, holder,
+        from types import SimpleNamespace
+        from persistence.authority.coordination import acquire_turn_lease_waiting
+        attempts = SimpleNamespace(try_acquire_turn_lease=lambda *, session_id, holder, ttl_seconds, patience_s:
+                                   self.try_acquire_session_turn_lease(session_id, holder, ttl_seconds=ttl_seconds,
+                                                                       patience_s=patience_s))
+        return acquire_turn_lease_waiting(attempts, session_id=session_id, holder=holder,
             ttl_seconds=ttl_seconds, wait_seconds=wait_seconds,
             poll_interval_seconds=poll_interval_seconds, on_wait=on_wait,
             wait_notice_interval_seconds=wait_notice_interval_seconds,
@@ -457,8 +529,8 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         return self._session_number(session_id, 'compression_recovery_deadline', float, 0.0)
 
     def get_session_model_config_value(self, session_id, key, default=None):
-        from hermes_state_sessions import _parse_model_config
-        return _parse_model_config(self.get_session(session_id).get('model_config')).get(key, default)
+        from persistence.conversation.sessions import parse_model_config
+        return parse_model_config(self.get_session(session_id).get('model_config')).get(key, default)
 
     def update_conversation_model_config_value(self, session_id, key, update):
         # A worker owns exactly its session row, so the read-modify-write is that row's; the owner applies
