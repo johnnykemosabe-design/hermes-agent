@@ -533,6 +533,13 @@ def hello():
     return {'pid': me.pid, 'birth': worker_birth(me), 'ancestors': [p.pid for p in me.parents()[:3]]}
 
 
+def _failure_reason(exc):
+    from agent.runtime_session_store import WorkerPersistenceError
+    if isinstance(exc, (WorkerPersistenceError, TimeoutError)) and str(exc) == 'worker_receipt_timeout':
+        return 'worker_transport_timeout'
+    return 'managed_worker_failed'
+
+
 def main():
     channel = WorkerChannel(os.fdopen(os.dup(sys.stdout.fileno()), 'wb', buffering=0))  # windows-footgun: ok — binary frames
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
@@ -546,10 +553,10 @@ def main():
         channel.send('hello', **hello())
         frame = validate_bootstrap(read_frame(sys.stdin.buffer))
         execute(frame, channel)
-    except Exception:
+    except Exception as exc:
         # Runtime exceptions can contain credentials; the owner gets no raw traceback.
         logger.exception('managed worker failed')
-        channel.send('error', reason='managed_worker_failed')
+        channel.send('error', reason=_failure_reason(exc))
         return 1
     finally:
         channel.stream.close()

@@ -1049,6 +1049,7 @@ class _DeadWorker:
     protocol_violation: bool = False
     rate_limited: bool = False
     terminal_provider: bool = False
+    transport_timeout: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
 
@@ -1056,6 +1057,8 @@ class _DeadWorker:
     def run_outcome(self) -> str:
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
         # doesn't show a phantom crash for a quota wall.
+        if self.transport_timeout:
+            return "transport_timeout"
         return "rate_limited" if self.rate_limited else "crashed"
 
 
@@ -1223,7 +1226,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.protocol_violation or dead.transport_timeout:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
@@ -1233,6 +1236,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
+            if dead.transport_timeout:
+                # Host transport loss is never fed to the systemic-failure breaker.
+                continue
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
             else:
@@ -1599,6 +1605,14 @@ def check_respawn_guard(
     ).fetchone()
     infrastructure = (latest_run is not None and latest_run["outcome"] == "spawn_failed"
                       and bool(_kb._json_dict(latest_run["metadata"]).get("infrastructure")))
+    transport = latest_run is not None and latest_run['outcome'] == 'transport_timeout'
+    if transport:
+        # Always back off even when the quota cooldown is disabled. Persisted run time
+        # makes the delay survive dispatcher restarts; a newer real failure supersedes it.
+        ended = _kb._to_epoch(latest_run['ended_at'])
+        if ended is not None and now - ended < max(30, rl_cooldown):
+            return 'infrastructure_cooldown'
+        return None
     ended_at = _kb._to_epoch(latest_run["ended_at"]) if infrastructure else None
     if rl_cooldown > 0 and ended_at is not None and (now - ended_at) < rl_cooldown:
         return "infrastructure_cooldown"

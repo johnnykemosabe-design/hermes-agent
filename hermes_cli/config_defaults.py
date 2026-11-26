@@ -1850,6 +1850,14 @@ DEFAULT_CONFIG = {
         # early failure evidence from long-running workers.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,
         "worker_log_backup_count": 1,
+        # Worker -> owner RPC receipt windows. Individual wait remains 20s. A timeout
+        # waits again on the SAME request; only receipt-idempotent saves/adoption replay.
+        # Bounds: timeout .01..300s, retries 0..5, exponential backoff 0..10s.
+        # Read from the owner home, not the worker's launch profile. All worker kinds
+        # share this owner transport even though its tuning namespace is Kanban.
+        "worker_reply_timeout_seconds": 20.0,
+        "worker_reply_retries": 2,
+        "worker_reply_backoff_seconds": 1.0,
         # Profile for the root/orchestration task after Triage decomposition; "" = default profile.
         # Does not control the decomposer LLM path (see auxiliary.kanban_decomposer).
         "orchestrator_profile": "",

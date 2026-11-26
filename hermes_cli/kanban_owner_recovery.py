@@ -230,6 +230,12 @@ def apply_attempt_note(conn, task_id, pid, dead) -> None:
     dead.event_payload["attempt_note"] = note
     if lost:
         dead.event_payload["worker_lost"] = lost
+        if lost.get('reason') == 'worker_transport_timeout':
+            dead.transport_timeout = True
+            dead.protocol_violation = False
+            dead.event_payload.pop('protocol_violation', None)
+            dead.event_payload['infrastructure'] = True
+            dead.event_kind = 'transport_timeout'
         if dead.protocol_violation:
             from hermes_cli.kanban_db_dispatch import _PROTOCOL_VIOLATION_ERROR
             dead.protocol_violation = False

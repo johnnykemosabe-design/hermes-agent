@@ -684,7 +684,56 @@ async def _finalize_managed_refusal(authority, session_id, accepted):
             session_id, None, accepted.get('refused_turn_boundary_row_id'))
 
 
+def _owner_finished(authority, scope):
+    from gateway.session_persistence import authority_persistence
+    repo = authority_persistence(authority).worker_executions
+    session_id = repo.execution_session(execution_id=scope['execution_id'])
+    if session_id is None:
+        return False
+    from persistence.authority.vocabulary import admission_fingerprint
+    from gateway.session_worker import _SCOPE
+    claim = admission_fingerprint(canonical_target=scope['session_id'],
+                                  payload={key: scope[key] for key in _SCOPE} |
+                                  {'principal': owner_worker_subject()})
+    try:
+        row = repo.verify_claim(execution_id=scope['execution_id'], session_id=session_id,
+                                generation=scope['generation'], adoption_secret=claim)
+    except AuthorityRefusal:
+        return False
+    if row.status != 'terminal' or row.owner_epoch != scope['epoch'] or row.last_sequence < 1:
+        return False
+    try:
+        # Terminal alone also means revoked/lost. Replaying the terminal sequence
+        # must read an execution.finish receipt, never manufacture a successful finish.
+        repo.finish(epoch=scope['epoch'], execution_id=row.execution_id, session_id=row.session_id,
+                    generation=row.generation, sequence=row.last_sequence)
+    except AuthorityRefusal:
+        return False
+    return True
+
+
+async def _complete_managed(authority, row, scope, accepted, usage, worker):
+    accepted = _with_stop_cause(accepted, worker)
+    await _finalize_managed_refusal(authority, scope['session_id'], accepted)
+    authority.pending_results[row['admission_id']] = {
+        'result': {**accepted, 'local_viewer': True}, 'usage': usage,
+        **await asyncio.to_thread(_settled_session_usage, authority, scope['session_id'], accepted, scope['execution_id'])}
+    return accepted['final_response']
+
+
 async def execute_managed(authority, ref, row, policy):
+    # The model runs in another interpreter, but its owner still serves every save.
+    # An owner with only managed turns is NOT idle: full GC holds the GIL even
+    # from the housekeeping thread, so moving gc.collect to a thread is no fix.
+    from agent.review_idle_queue import QUEUE
+    QUEUE.note_turn_started()
+    try:
+        return await _execute_managed(authority, ref, row, policy)
+    finally:
+        QUEUE.note_turn_finished()
+
+
+async def _execute_managed(authority, ref, row, policy):
     from gateway.run_turn_progress import publish_worker_tool_event
     # This route never passes the inbound prepare step, so the worker would read ``@`` tokens as typed.
     from gateway.session_context_refs import managed_turn_text, refused_turn_result
@@ -736,8 +785,9 @@ async def execute_managed(authority, ref, row, policy):
             with authority.sessions[ref.session_id].event_stream.lock:
                 if _prompt_frame(authority, ref, row, worker, frame):
                     continue
-            if frame == {'type': 'error', 'reason': 'managed_worker_failed'}:
-                raise AuthorityRefusal('managed_worker_failed')
+            if frame in ({'type': 'error', 'reason': 'managed_worker_failed'},
+                         {'type': 'error', 'reason': 'worker_transport_timeout'}):
+                raise AuthorityRefusal(frame['reason'])
             kind = frame.get('type')
             if kind == 'ready' and set(frame) == {'type', 'pid'} and frame['pid'] == scope['pid']:
                 continue
@@ -759,18 +809,17 @@ async def execute_managed(authority, ref, row, policy):
                 # A slow or non-zero interpreter exit after it is close()'s cleanup, not a loss.
                 with suppress(subprocess.TimeoutExpired):
                     await asyncio.to_thread(process.wait, 10)
-                accepted = _with_stop_cause(accepted, worker)
-                await _finalize_managed_refusal(authority, scope['session_id'], accepted)
-                # Like in-process execution, settlement belongs to the drain's stream lock.
-                authority.pending_results[row['admission_id']] = {
-                    'result': {**accepted, 'local_viewer': True}, 'usage': usage,
-                    **await asyncio.to_thread(_settled_session_usage, authority, scope['session_id'], accepted, scope['execution_id'])}
-                return accepted['final_response']
+                return await _complete_managed(authority, row, scope, accepted, usage, worker)
             raise AuthorityRefusal('invalid_worker_frame')
     except (Exception, asyncio.CancelledError) as exc:
         import logging
         from storage_user_copy import error_type_name
         reason = exc.reason if isinstance(exc, AuthorityRefusal) else error_type_name(exc)
+        if (scope is not None and accepted is not None and reason == 'worker_transport_timeout'
+                and await asyncio.to_thread(_owner_finished, authority, scope)):
+            # execution.finish committed even though neither its RPC ACK nor finished
+            # pipe frame arrived. Do not overwrite that durable terminal with unknown.
+            return await _complete_managed(authority, row, scope, accepted, usage, worker)
         logging.getLogger(__name__).warning('Managed worker lost: %s', reason)
         if scope is None:
             if isinstance(exc, asyncio.CancelledError) or (
